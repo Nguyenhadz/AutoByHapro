@@ -1,0 +1,49 @@
+# IntelliJ IDEA
+.idea/
+*.iml
+out/
+
+# Maven
+target/
+
+# App build và installer
+main_tool_app/
+main_tool_installer/
+release/
+installer_version.issinc
+
+# File đóng gói
+*.exe
+*.msi
+*.zip
+
+# Database và dữ liệu người dùng
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Video và dữ liệu runtime
+video/
+exports/
+logs/
+backups/
+
+# Licence và dữ liệu nhạy cảm
+*.lic
+private_key.pem
+generated_licenses/
+license_admin_app/
+
+# Cookies đăng nhập
+youtube_cookies.txt
+cookies.txt
+*cookies*.txt
+
+# Công cụ tải ngoài, có thể có file trên 100 MB
+tools/
+
+# File hệ thống Windows
+Thumbs.db
+Desktop.ini

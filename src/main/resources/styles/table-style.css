@@ -1,0 +1,38 @@
+.table-view {
+    -fx-font-size: 13px;
+}
+
+.table-view .column-header .label {
+    -fx-alignment: CENTER;
+    -fx-text-alignment: CENTER;
+    -fx-font-weight: bold;
+}
+
+/* Nội dung ô: giữa theo chiều dọc, căn trái theo chiều ngang */
+.table-view .table-cell {
+    -fx-alignment: CENTER_LEFT;
+    -fx-text-alignment: LEFT;
+    -fx-padding: 0 8 0 8;
+}
+
+/* Chiều cao dòng đều nhau */
+.table-row-cell {
+    -fx-cell-size: 42px;
+}
+
+/* Các control trong bảng thì vẫn căn giữa */
+.table-view .button {
+    -fx-alignment: CENTER;
+}
+
+.table-view .check-box {
+    -fx-alignment: CENTER;
+}
+
+.table-view .spinner {
+    -fx-alignment: CENTER;
+}
+
+.table-view .spinner .text-field {
+    -fx-alignment: CENTER_LEFT;
+}
