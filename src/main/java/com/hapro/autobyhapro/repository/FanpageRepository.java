@@ -3,7 +3,11 @@ package com.hapro.autobyhapro.repository;
 import com.hapro.autobyhapro.database.DatabaseManager;
 import com.hapro.autobyhapro.entity.Fanpage;
 
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -54,6 +58,30 @@ public class FanpageRepository {
 
         } catch (SQLException exception) {
             throw new RuntimeException("Không thể lưu fanpage.", exception);
+        }
+    }
+
+    public void updatePageName(long fanpageId, String newPageName) {
+        String sql = """
+                UPDATE fanpages
+                SET page_name = ?
+                WHERE id = ?
+                """;
+
+        try (Connection connection = DatabaseManager.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            preparedStatement.setString(1, newPageName);
+            preparedStatement.setLong(2, fanpageId);
+
+            int updatedRows = preparedStatement.executeUpdate();
+
+            if (updatedRows == 0) {
+                throw new RuntimeException("Không tìm thấy fanpage cần sửa tên.");
+            }
+
+        } catch (SQLException exception) {
+            throw new RuntimeException("Không thể sửa tên fanpage.", exception);
         }
     }
 

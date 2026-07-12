@@ -14,6 +14,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
+import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
@@ -26,9 +27,6 @@ import javafx.scene.layout.VBox;
 
 import java.util.List;
 import java.util.Optional;
-import javafx.scene.control.TableCell;
-import javafx.geometry.Pos;
-import javafx.beans.property.ReadOnlyStringWrapper;
 
 public class FanpageView {
 
@@ -66,7 +64,7 @@ public class FanpageView {
                 """);
 
         Label descriptionLabel = new Label(
-                "Thêm fanpage mới, xem danh sách fanpage và xóa toàn bộ fanpage khi không dùng nữa."
+                "Thêm fanpage mới, sửa tên fanpage, xem danh sách fanpage và xóa toàn bộ fanpage khi không dùng nữa."
         );
         descriptionLabel.setStyle("""
                 -fx-font-size: 14px;
@@ -195,7 +193,7 @@ public class FanpageView {
                 """);
 
         Label noteLabel = new Label(
-                "Cảnh báo: xóa fanpage là xóa thật toàn bộ source, video ID, batch, file record và folder raw/edited liên quan."
+                "Có thể sửa tên fanpage bất kỳ. Cảnh báo: xóa fanpage là xóa thật toàn bộ source, video ID, batch, file record và folder raw/edited liên quan."
         );
         noteLabel.setWrapText(true);
         noteLabel.setStyle("""
@@ -259,7 +257,7 @@ public class FanpageView {
                 new ReadOnlyStringWrapper(nullToEmpty(data.getValue().getNiche()))
         );
 
-        TableColumn<Fanpage, Number> defaultCountColumn = new TableColumn<>("Mặc định");
+        TableColumn<Fanpage, Integer> defaultCountColumn = new TableColumn<>("Mặc định");
         defaultCountColumn.setCellValueFactory(data ->
                 new ReadOnlyObjectWrapper<>(data.getValue().getDefaultVideoCount())
         );
@@ -275,16 +273,23 @@ public class FanpageView {
         );
         createdColumn.setPrefWidth(160);
 
-        TableColumn<Fanpage, Button> actionColumn = new TableColumn<>("Thao tác");
+        TableColumn<Fanpage, HBox> actionColumn = new TableColumn<>("Thao tác");
         actionColumn.setCellValueFactory(data -> {
             Fanpage fanpage = data.getValue();
+
+            Button editButton = smallSecondaryButton("Sửa tên");
+            editButton.setOnAction(event -> editFanpageName(fanpage));
 
             Button deleteButton = dangerButton("Xóa toàn bộ");
             deleteButton.setOnAction(event -> hardDeleteFanpage(fanpage));
 
-            return new ReadOnlyObjectWrapper<>(deleteButton);
+            HBox actionBox = new HBox(8);
+            actionBox.setAlignment(Pos.CENTER);
+            actionBox.getChildren().addAll(editButton, deleteButton);
+
+            return new ReadOnlyObjectWrapper<>(actionBox);
         });
-        actionColumn.setPrefWidth(130);
+        actionColumn.setPrefWidth(190);
 
         tableView.getColumns().setAll(
                 sttColumn,
@@ -355,6 +360,54 @@ public class FanpageView {
         }
     }
 
+    private void editFanpageName(Fanpage fanpage) {
+        if (fanpage == null) {
+            return;
+        }
+
+        TextInputDialog dialog = new TextInputDialog(nullToEmpty(fanpage.getPageName()));
+        dialog.setTitle("Sửa tên fanpage");
+        dialog.setHeaderText("Sửa tên fanpage: " + nullToEmpty(fanpage.getPageCode()));
+        dialog.setContentText("Tên mới:");
+
+        Optional<String> result = dialog.showAndWait();
+
+        if (result.isEmpty()) {
+            return;
+        }
+
+        String newPageName = result.get().trim();
+
+        if (newPageName.isBlank()) {
+            GuiAlert.warning("Tên fanpage không hợp lệ", "Tên fanpage mới không được để trống.");
+            return;
+        }
+
+        String oldPageName = nullToEmpty(fanpage.getPageName()).trim();
+
+        if (newPageName.equals(oldPageName)) {
+            GuiAlert.info("Không có thay đổi", "Tên fanpage vẫn giữ nguyên.");
+            return;
+        }
+
+        try {
+            fanpageRepository.updatePageName(fanpage.getId(), newPageName);
+
+            GuiAlert.info(
+                    "Sửa tên fanpage thành công",
+                    "Đã đổi:\n"
+                            + oldPageName
+                            + "\n\nthành:\n"
+                            + newPageName
+            );
+
+            refreshTable();
+
+        } catch (Exception exception) {
+            GuiAlert.error("Không thể sửa tên fanpage", exception);
+        }
+    }
+
     private void hardDeleteFanpage(Fanpage fanpage) {
         if (fanpage == null) {
             return;
@@ -365,7 +418,10 @@ public class FanpageView {
         warningAlert.setHeaderText("Cảnh báo xóa toàn bộ fanpage");
         warningAlert.setContentText(
                 "M chuẩn bị xóa toàn bộ fanpage này:\n\n"
-                        + fanpage.getPageCode() + " - " + fanpage.getPageName() + "\n\n"
+                        + fanpage.getPageCode()
+                        + " - "
+                        + fanpage.getPageName()
+                        + "\n\n"
                         + "Dữ liệu sẽ bị xóa:\n"
                         + "- Fanpage\n"
                         + "- Tất cả source của fanpage\n"
@@ -397,22 +453,30 @@ public class FanpageView {
         if (!fanpage.getPageCode().equals(typedCode)) {
             GuiAlert.warning(
                     "Mã xác nhận không đúng",
-                    "M phải nhập đúng mã " + fanpage.getPageCode() + " thì tool mới xóa."
+                    "M phải nhập đúng mã "
+                            + fanpage.getPageCode()
+                            + " thì tool mới xóa."
             );
             return;
         }
 
         try {
-            FanpageDeleteResult result =
-                    fanpageDeleteService.hardDeleteFanpage(fanpage);
+            FanpageDeleteResult result = fanpageDeleteService.hardDeleteFanpage(fanpage);
 
             GuiAlert.info(
                     "Đã xóa toàn bộ fanpage",
-                    "Fanpage: " + result.getPageCode() + " - " + result.getPageName()
-                            + "\nDòng DB đã xóa: " + result.getDatabaseDeletedRows()
-                            + "\nFolder đã xóa: " + result.getDeletedFolderCount()
-                            + "\nFile đã xóa: " + result.getDeletedFileCount()
-                            + "\n\n" + result.getMessage()
+                    "Fanpage: "
+                            + result.getPageCode()
+                            + " - "
+                            + result.getPageName()
+                            + "\nDòng DB đã xóa: "
+                            + result.getDatabaseDeletedRows()
+                            + "\nFolder đã xóa: "
+                            + result.getDeletedFolderCount()
+                            + "\nFile đã xóa: "
+                            + result.getDeletedFileCount()
+                            + "\n\n"
+                            + result.getMessage()
             );
 
             refreshTable();
@@ -482,6 +546,20 @@ public class FanpageView {
                 -fx-background-color: #e5e7eb;
                 -fx-text-fill: #111827;
                 -fx-font-size: 14px;
+                -fx-background-radius: 8;
+                -fx-cursor: hand;
+                """);
+        return button;
+    }
+
+    private Button smallSecondaryButton(String text) {
+        Button button = new Button(text);
+        button.setMinHeight(30);
+        button.setStyle("""
+                -fx-background-color: #e5e7eb;
+                -fx-text-fill: #111827;
+                -fx-font-size: 12px;
+                -fx-font-weight: bold;
                 -fx-background-radius: 8;
                 -fx-cursor: hand;
                 """);
