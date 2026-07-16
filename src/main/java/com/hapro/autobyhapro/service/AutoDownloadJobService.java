@@ -10,12 +10,8 @@ import com.hapro.autobyhapro.entity.VideoBatchFolder;
 import com.hapro.autobyhapro.entity.VideoCandidate;
 import com.hapro.autobyhapro.entity.VideoDownloadItemResult;
 import com.hapro.autobyhapro.repository.DownloadPlanRepository;
-import com.hapro.autobyhapro.util.FileNameUtil;
 import com.hapro.autobyhapro.repository.SourceContentCacheRepository;
-
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import com.hapro.autobyhapro.util.FileNameUtil;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -24,6 +20,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class AutoDownloadJobService {
 
@@ -33,9 +32,7 @@ public class AutoDownloadJobService {
     private final DownloadPlanRepository downloadPlanRepository = new DownloadPlanRepository();
     private final VideoDownloadService videoDownloadService = new VideoDownloadService();
     private final YtDlpService ytDlpService = new YtDlpService();
-    private final SourceContentCacheRepository sourceContentCacheRepository =
-            new SourceContentCacheRepository();
-
+    private final SourceContentCacheRepository sourceContentCacheRepository = new SourceContentCacheRepository();
 
     public AutoDownloadJobResult runJob(
             List<DownloadTarget> selectedTargets,
@@ -80,8 +77,8 @@ public class AutoDownloadJobService {
                         target.getDefaultVideoCount()
                 );
 
-                Future<AutoDownloadPageResult> future = executorService.submit(() ->
-                        runOnePage(target, requestedCount, actualThreadCount)
+                Future<AutoDownloadPageResult> future = executorService.submit(
+                        () -> runOnePage(target, requestedCount, actualThreadCount)
                 );
 
                 futures.add(future);
@@ -97,7 +94,6 @@ public class AutoDownloadJobService {
 
         } catch (Exception exception) {
             throw new RuntimeException("Tải song song bị lỗi.", exception);
-
         } finally {
             executorService.shutdownNow();
         }
@@ -132,8 +128,15 @@ public class AutoDownloadJobService {
         try {
             Source source = toSource(target);
 
-            int scanRequestCount = buildInitialScanRequestCount(target, requestedCount);
-            int maxScanRequestCount = buildMaxScanRequestCount(target, requestedCount);
+            int scanRequestCount = buildInitialScanRequestCount(
+                    target,
+                    requestedCount
+            );
+
+            int maxScanRequestCount = buildMaxScanRequestCount(
+                    target,
+                    requestedCount
+            );
 
             SourceScanResult scanResult = null;
 
@@ -146,14 +149,10 @@ public class AutoDownloadJobService {
                 videosToDownload = selectDownloadableVideos(
                         target,
                         scanResult.getNewVideos(),
-                        requestedCount
+                        scanRequestCount
                 );
 
                 if (videosToDownload.size() >= requestedCount) {
-                    break;
-                }
-
-                if (!isTikTokTarget(target)) {
                     break;
                 }
 
@@ -170,13 +169,33 @@ public class AutoDownloadJobService {
                     break;
                 }
 
-                System.out.println("TikTok chưa đủ video thật. Tăng số bài quét từ "
-                        + scanRequestCount
-                        + " lên "
-                        + nextScanRequestCount
-                        + "...");
+                System.out.println(
+                        "Chưa đủ video ứng viên. Tăng số bài quét từ "
+                                + scanRequestCount
+                                + " lên "
+                                + nextScanRequestCount
+                                + "..."
+                );
 
                 scanRequestCount = nextScanRequestCount;
+            }
+
+            if (scanResult == null) {
+                return new AutoDownloadPageResult(
+                        target,
+                        requestedCount,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        null,
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        "NO_VIDEO",
+                        "Không đọc được source."
+                );
             }
 
             if (videosToDownload.isEmpty()) {
@@ -207,13 +226,14 @@ public class AutoDownloadJobService {
             folders = createVideoBatchFolders(
                     target,
                     downloadBatchId,
-                    videosToDownload.size()
+                    requestedCount
             );
 
             downloadResults = videoDownloadService.downloadVideos(
                     target,
                     videosToDownload,
-                    folders
+                    folders,
+                    requestedCount
             );
 
             int downloadedCount = countSuccess(downloadResults);
@@ -238,9 +258,9 @@ public class AutoDownloadJobService {
 
             String message = "Yêu cầu "
                     + requestedCount
-                    + " video, quét được "
+                    + " video, chuẩn bị "
                     + videosToDownload.size()
-                    + " video mới, tải thành công "
+                    + " video ứng viên, tải thành công "
                     + downloadedCount
                     + " video.";
 
@@ -325,24 +345,32 @@ public class AutoDownloadJobService {
     private int buildInitialScanRequestCount(DownloadTarget target, int requestedCount) {
         int safeRequestedCount = Math.max(1, requestedCount);
 
-        if (!isTikTokTarget(target)) {
-            return safeRequestedCount;
+        if (isTikTokTarget(target)) {
+            return Math.min(
+                    Math.max(safeRequestedCount * 5, 30),
+                    100
+            );
         }
 
+        /*
+         * YouTube cũng lấy dư ứng viên.
+         * Nếu vài video đầu là members-only/private/unavailable,
+         * VideoDownloadService sẽ ghi chúng vào DB rồi thử video tiếp theo trong cùng lượt tải.
+         */
         return Math.min(
-                Math.max(safeRequestedCount * 5, 30),
-                100
+                Math.max(safeRequestedCount * 3, safeRequestedCount + 12),
+                80
         );
     }
 
     private int buildMaxScanRequestCount(DownloadTarget target, int requestedCount) {
         int safeRequestedCount = Math.max(1, requestedCount);
 
-        if (!isTikTokTarget(target)) {
-            return safeRequestedCount;
+        if (isTikTokTarget(target)) {
+            return Math.max(1000, safeRequestedCount * 20);
         }
 
-        return Math.max(1000, safeRequestedCount * 20);
+        return Math.max(100, safeRequestedCount * 10);
     }
 
     private List<VideoCandidate> selectDownloadableVideos(
@@ -377,7 +405,9 @@ public class AutoDownloadJobService {
                 break;
             }
 
-            if (candidate == null || candidate.getVideoId() == null || candidate.getVideoId().isBlank()) {
+            if (candidate == null
+                    || candidate.getVideoId() == null
+                    || candidate.getVideoId().isBlank()) {
                 continue;
             }
 
@@ -428,11 +458,13 @@ public class AutoDownloadJobService {
             System.out.println("Bỏ qua TikTok " + contentType + ": " + candidate.getVideoId());
         }
 
-        System.out.println("TikTok lọc xong: chọn được "
-                + selectedVideos.size()
-                + "/"
-                + safeRequestedCount
-                + " video thật.");
+        System.out.println(
+                "TikTok lọc xong: chọn được "
+                        + selectedVideos.size()
+                        + "/"
+                        + safeRequestedCount
+                        + " video thật."
+        );
 
         return selectedVideos;
     }
@@ -443,7 +475,9 @@ public class AutoDownloadJobService {
             int actualVideoCount
     ) {
         String pageFolderName = FileNameUtil.safeFolderName(
-                target.getFanpageCode() + "_" + target.getFanpageName(),
+                target.getFanpageCode()
+                        + "_"
+                        + target.getFanpageName(),
                 80
         );
 
@@ -459,7 +493,10 @@ public class AutoDownloadJobService {
         List<VideoBatchFolder> videoBatchFolders = new ArrayList<>();
 
         for (int batchIndex = 1; batchIndex <= totalBatchCount; batchIndex++) {
-            int batchVideoCount = Math.min(VIDEO_PER_FOLDER_BATCH, remainingVideoCount);
+            int batchVideoCount = Math.min(
+                    VIDEO_PER_FOLDER_BATCH,
+                    remainingVideoCount
+            );
 
             String batchCode = String.format(
                     "%s__D%06d__B%03d",

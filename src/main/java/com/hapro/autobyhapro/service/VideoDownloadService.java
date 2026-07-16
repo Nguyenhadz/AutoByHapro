@@ -29,6 +29,22 @@ public class VideoDownloadService {
             List<VideoCandidate> videos,
             List<VideoBatchFolder> folders
     ) {
+        int requestedSuccessCount = videos == null ? 0 : videos.size();
+
+        return downloadVideos(
+                target,
+                videos,
+                folders,
+                requestedSuccessCount
+        );
+    }
+
+    public List<VideoDownloadItemResult> downloadVideos(
+            DownloadTarget target,
+            List<VideoCandidate> videos,
+            List<VideoBatchFolder> folders,
+            int requestedSuccessCount
+    ) {
         List<VideoDownloadItemResult> results = new ArrayList<>();
 
         if (videos == null || videos.isEmpty()) {
@@ -39,20 +55,39 @@ public class VideoDownloadService {
             throw new RuntimeException("Chưa có folder batch để tải video.");
         }
 
-        for (int index = 0; index < videos.size(); index++) {
-            VideoCandidate video = videos.get(index);
+        int folderCapacity = countFolderCapacity(folders);
+        int targetSuccessCount = requestedSuccessCount;
 
-            int folderIndex = index / VIDEO_PER_FOLDER_BATCH;
+        if (targetSuccessCount <= 0) {
+            targetSuccessCount = folderCapacity;
+        }
+
+        if (folderCapacity > 0) {
+            targetSuccessCount = Math.min(targetSuccessCount, folderCapacity);
+        }
+
+        int successCount = 0;
+        int attemptCount = 0;
+
+        for (VideoCandidate video : videos) {
+            if (successCount >= targetSuccessCount) {
+                break;
+            }
+
+            attemptCount++;
+
+            int folderIndex = successCount / VIDEO_PER_FOLDER_BATCH;
 
             if (folderIndex >= folders.size()) {
                 folderIndex = folders.size() - 1;
             }
 
-            int indexInFolder = (index % VIDEO_PER_FOLDER_BATCH) + 1;
+            int indexInFolder = (successCount % VIDEO_PER_FOLDER_BATCH) + 1;
             VideoBatchFolder folder = folders.get(folderIndex);
 
             System.out.println();
-            System.out.println("Đang tải video " + (index + 1) + "/" + videos.size());
+            System.out.println("Đang tải video ứng viên " + attemptCount + "/" + videos.size());
+            System.out.println("Đã tải thành công: " + successCount + "/" + targetSuccessCount);
             System.out.println("Batch: " + folder.getBatchCode());
             System.out.println("Video ID: " + video.getVideoId());
             System.out.println("Title: " + video.getTitle());
@@ -67,6 +102,7 @@ public class VideoDownloadService {
             results.add(itemResult);
 
             if (itemResult.isSuccess()) {
+                successCount++;
                 System.out.println("Tải thành công: " + itemResult.getFilePath());
             } else {
                 System.out.println("Tải thất bại: " + itemResult.getMessage());
@@ -74,6 +110,24 @@ public class VideoDownloadService {
         }
 
         return results;
+    }
+
+    private int countFolderCapacity(List<VideoBatchFolder> folders) {
+        int total = 0;
+
+        if (folders == null) {
+            return total;
+        }
+
+        for (VideoBatchFolder folder : folders) {
+            if (folder == null) {
+                continue;
+            }
+
+            total = total + Math.max(0, folder.getVideoCount());
+        }
+
+        return total;
     }
 
     private VideoDownloadItemResult downloadOneVideo(
@@ -114,14 +168,29 @@ public class VideoDownloadService {
             CommandResult commandResult = runCommand(command, DOWNLOAD_TIMEOUT_SECONDS);
 
             if (!commandResult.success()) {
-                return fail(
-                        video,
-                        folder,
-                        "yt-dlp tải lỗi. Exit code: "
-                                + commandResult.exitCode()
-                                + "\n"
-                                + commandResult.output()
-                );
+                String fullMessage = "yt-dlp tải lỗi.\n"
+                        + "Exit code: "
+                        + commandResult.exitCode()
+                        + "\n"
+                        + commandResult.output();
+
+                if (shouldRememberFailedVideoAsUnavailable(commandResult.output())) {
+                    rememberSkippedUnavailableVideo(
+                            target,
+                            video,
+                            downloadUrl
+                    );
+
+                    return fail(
+                            video,
+                            folder,
+                            fullMessage
+                                    + "\n\nĐã lưu video này vào DB với status SKIPPED_UNAVAILABLE."
+                                    + "\nLần sau tool sẽ bỏ qua video này và quét video tiếp theo."
+                    );
+                }
+
+                return fail(video, folder, fullMessage);
             }
 
             Path downloadedFile = findDownloadedFile(folder.getRawFolderPath(), baseFileName);
@@ -159,23 +228,92 @@ public class VideoDownloadService {
         }
     }
 
+    private void rememberSkippedUnavailableVideo(
+            DownloadTarget target,
+            VideoCandidate video,
+            String downloadUrl
+    ) {
+        videoRepository.saveSkippedUnavailableVideo(
+                target.getSourceId(),
+                target.getFanpageId(),
+                video.getVideoId(),
+                video.getTitle(),
+                target.getSourceName(),
+                downloadUrl
+        );
+    }
+
+    private boolean shouldRememberFailedVideoAsUnavailable(String output) {
+        if (output == null || output.isBlank()) {
+            return false;
+        }
+
+        String lowerOutput = output.toLowerCase();
+
+        if (isProbablyTemporaryOrToolFailure(lowerOutput)) {
+            return false;
+        }
+
+        return lowerOutput.contains("members-only")
+                || lowerOutput.contains("members only")
+                || lowerOutput.contains("member-only")
+                || lowerOutput.contains("join this channel")
+                || lowerOutput.contains("available to this channel's members")
+                || lowerOutput.contains("available to members")
+                || lowerOutput.contains("members have access")
+                || lowerOutput.contains("subscribers only")
+                || lowerOutput.contains("subscriber-only")
+                || lowerOutput.contains("paid subscribers")
+                || lowerOutput.contains("private video")
+                || lowerOutput.contains("this video is private")
+                || lowerOutput.contains("this account is private")
+                || lowerOutput.contains("video unavailable")
+                || lowerOutput.contains("this video is unavailable")
+                || lowerOutput.contains("video is unavailable")
+                || lowerOutput.contains("video is not available")
+                || lowerOutput.contains("this video is not available")
+                || lowerOutput.contains("post is unavailable")
+                || lowerOutput.contains("couldn't find this video")
+                || lowerOutput.contains("could not find this video")
+                || lowerOutput.contains("has been removed")
+                || lowerOutput.contains("has been deleted")
+                || lowerOutput.contains("not made this video available")
+                || lowerOutput.contains("blocked in your country")
+                || lowerOutput.contains("only available to followers")
+                || lowerOutput.contains("friends only");
+    }
+
+    private boolean isProbablyTemporaryOrToolFailure(String lowerOutput) {
+        return lowerOutput.contains("unable to extract universal data")
+                || lowerOutput.contains("please report this issue")
+                || lowerOutput.contains("confirm you are on the latest version")
+                || lowerOutput.contains("requested format is not available")
+                || lowerOutput.contains("sign in to confirm you’re not a bot")
+                || lowerOutput.contains("sign in to confirm you're not a bot")
+                || lowerOutput.contains("not a bot")
+                || lowerOutput.contains("too many requests")
+                || lowerOutput.contains("http error 429")
+                || lowerOutput.contains("429: too many requests")
+                || lowerOutput.contains("timed out")
+                || lowerOutput.contains("timeout")
+                || lowerOutput.contains("network is unreachable")
+                || lowerOutput.contains("connection reset")
+                || lowerOutput.contains("connection aborted")
+                || lowerOutput.contains("temporary failure")
+                || lowerOutput.contains("temporarily unavailable")
+                || lowerOutput.contains("unable to download webpage")
+                || lowerOutput.contains("unsupported url");
+    }
+
     private String buildWindowsCompatibleMp4FormatSelector() {
-        return String.join("/",
-                // YouTube: ưu tiên video H.264/AVC1 mp4 + audio AAC/M4A
+        return String.join(
+                "/",
                 "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]",
-
-                // YouTube fallback: video H.264/AVC1 mp4 + audio m4a
                 "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]",
-
-                // Một số nền tảng ghi codec là h264 thay vì avc1
                 "bestvideo[ext=mp4][vcodec^=h264]+bestaudio[ext=m4a][acodec^=mp4a]",
                 "bestvideo[ext=mp4][vcodec^=h264]+bestaudio[ext=m4a]",
-
-                // File mp4 có sẵn cả video + audio, ưu tiên H.264 + AAC
                 "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]",
                 "best[ext=mp4][vcodec^=h264][acodec^=mp4a]",
-
-                // Fallback cuối: vẫn chỉ lấy mp4 H.264, không lấy webm/av1/vp9
                 "best[ext=mp4][vcodec^=avc1]",
                 "best[ext=mp4][vcodec^=h264]",
                 "best[ext=mp4]"
@@ -195,17 +333,11 @@ public class VideoDownloadService {
     }
 
     private String buildTikTokFormatSelector() {
-        return String.join("/",
-                // TikTok: ưu tiên đúng nhóm format H.264 có sẵn cả hình và tiếng.
-                // Tránh "best[ext=mp4]" vì có thể chọn bytevc1/HEVC bị mất âm thanh.
+        return String.join(
+                "/",
                 "best[format_id^=h264_][acodec!=none]",
-
-                // Fallback khi yt-dlp ghi codec là h264 hoặc avc1 thay vì dùng prefix format_id.
                 "best[ext=mp4][vcodec^=h264][acodec!=none]",
                 "best[ext=mp4][vcodec^=avc1][acodec!=none]",
-
-                // Một số video TikTok có format H.264 nhưng metadata audio không khai báo đầy đủ.
-                // Vẫn ưu tiên H.264; không fallback sang bytevc1 để tránh tải file chỉ có hình.
                 "best[format_id^=h264_]",
                 "best[ext=mp4][vcodec^=h264]",
                 "best[ext=mp4][vcodec^=avc1]"
@@ -275,11 +407,9 @@ public class VideoDownloadService {
 
         command.add(ytDlp.toAbsolutePath().toString());
 
-        // Ép UTF-8 để log/output không làm hỏng tiếng Việt.
         command.add("--encoding");
         command.add("utf-8");
 
-        // Ưu tiên metadata tiếng Việt khi tải YouTube.
         command.add("--extractor-args");
         command.add("youtube:lang=vi");
 
@@ -347,7 +477,6 @@ public class VideoDownloadService {
                 indexInFolder
         );
 
-        // Giữ title gốc từ video, không tự đổi chữ hoa/thường ở bước raw.
         String safeTitle = FileNameUtil.safeFileName(video.getTitle(), 90);
 
         String baseName = prefix;
@@ -401,6 +530,7 @@ public class VideoDownloadService {
             ProcessBuilder processBuilder = new ProcessBuilder(command);
             processBuilder.redirectErrorStream(true);
             processBuilder.directory(AppPaths.rootDir().toFile());
+
             addBundledDenoToPath(processBuilder);
 
             processBuilder.environment().put("PYTHONIOENCODING", "utf-8");
@@ -411,7 +541,6 @@ public class VideoDownloadService {
             process = processBuilder.start();
 
             StringBuilder outputBuilder = new StringBuilder();
-
             Process finalProcess = process;
 
             Thread outputReaderThread = new Thread(() -> {
@@ -423,6 +552,7 @@ public class VideoDownloadService {
                     while ((line = reader.readLine()) != null) {
                         outputBuilder.append(line).append(System.lineSeparator());
                     }
+
                 } catch (Exception exception) {
                     outputBuilder.append("Không đọc được output: ")
                             .append(exception.getMessage())
@@ -452,7 +582,6 @@ public class VideoDownloadService {
             }
 
             int exitCode = process.exitValue();
-
             outputReaderThread.join(3000);
 
             return new CommandResult(
@@ -489,13 +618,6 @@ public class VideoDownloadService {
         );
     }
 
-    private record CommandResult(
-            boolean success,
-            int exitCode,
-            String output
-    ) {
-    }
-
     private void addBundledDenoToPath(ProcessBuilder processBuilder) {
         Path denoFile = AppPaths.denoFile();
 
@@ -504,12 +626,18 @@ public class VideoDownloadService {
         }
 
         Path denoFolder = denoFile.getParent();
-
         String currentPath = processBuilder.environment().getOrDefault("PATH", "");
 
         processBuilder.environment().put(
                 "PATH",
                 denoFolder.toAbsolutePath() + ";" + currentPath
         );
+    }
+
+    private record CommandResult(
+            boolean success,
+            int exitCode,
+            String output
+    ) {
     }
 }

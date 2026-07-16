@@ -4,7 +4,11 @@ import com.hapro.autobyhapro.database.DatabaseManager;
 import com.hapro.autobyhapro.entity.EditedVideoTarget;
 
 import java.nio.file.Path;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
@@ -38,7 +42,6 @@ public class VideoRepository {
             preparedStatement.setLong(1, sourceId);
 
             int parameterIndex = 2;
-
             for (String videoId : videoIds) {
                 preparedStatement.setString(parameterIndex, videoId);
                 parameterIndex++;
@@ -140,6 +143,72 @@ public class VideoRepository {
         }
     }
 
+    public void saveSkippedUnavailableVideo(
+            Long sourceId,
+            Long fanpageId,
+            String platformVideoId,
+            String title,
+            String channelName,
+            String originalUrl
+    ) {
+        if (sourceId == null) {
+            throw new RuntimeException("sourceId đang bị trống, không thể lưu video bị bỏ qua.");
+        }
+
+        if (fanpageId == null) {
+            throw new RuntimeException("fanpageId đang bị trống, không thể lưu video bị bỏ qua.");
+        }
+
+        if (platformVideoId == null || platformVideoId.isBlank()) {
+            throw new RuntimeException("platformVideoId đang bị trống, không thể lưu video bị bỏ qua.");
+        }
+
+        /*
+         * batch_id để NULL để video bị chặn không làm lệch folder/batch upload.
+         * Chỉ cần source_id + platform_video_id nằm trong bảng videos là scanner sẽ bỏ qua ở lần sau.
+         */
+        String sql = """
+                INSERT OR IGNORE INTO videos (
+                    batch_id,
+                    source_id,
+                    fanpage_id,
+                    platform_video_id,
+                    title,
+                    channel_name,
+                    original_url,
+                    downloaded_time,
+                    status
+                )
+                VALUES (
+                    NULL,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    NULL,
+                    'SKIPPED_UNAVAILABLE'
+                )
+                """;
+
+        try (Connection connection = DatabaseManager.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            preparedStatement.setLong(1, sourceId);
+            preparedStatement.setLong(2, fanpageId);
+            preparedStatement.setString(3, platformVideoId);
+            preparedStatement.setString(4, title);
+            preparedStatement.setString(5, channelName);
+            preparedStatement.setString(6, originalUrl);
+
+            preparedStatement.executeUpdate();
+
+        } catch (SQLException exception) {
+            throw new RuntimeException("Không thể lưu video bị giới hạn/không khả dụng vào database.", exception);
+        }
+    }
+
     public EditedVideoTarget findEditedVideoTarget(String batchCode, String platformVideoIdOrPrefix) {
         String cleanBatchCode = normalizeBatchCode(batchCode);
         String cleanVideoId = cleanText(platformVideoIdOrPrefix);
@@ -197,9 +266,7 @@ public class VideoRepository {
                 FROM videos v
                 INNER JOIN video_batches b ON b.id = v.batch_id
                 INNER JOIN (
-                    SELECT
-                        video_id,
-                        MIN(file_path) AS raw_file_path
+                    SELECT video_id, MIN(file_path) AS raw_file_path
                     FROM video_files
                     WHERE file_type = 'RAW'
                     GROUP BY video_id
@@ -288,9 +355,7 @@ public class VideoRepository {
                 FROM videos v
                 INNER JOIN video_batches b ON b.id = v.batch_id
                 LEFT JOIN (
-                    SELECT
-                        video_id,
-                        MIN(file_path) AS raw_file_path
+                    SELECT video_id, MIN(file_path) AS raw_file_path
                     FROM video_files
                     WHERE file_type = 'RAW'
                     GROUP BY video_id
@@ -340,9 +405,7 @@ public class VideoRepository {
                 FROM videos v
                 INNER JOIN video_batches b ON b.id = v.batch_id
                 LEFT JOIN (
-                    SELECT
-                        video_id,
-                        MIN(file_path) AS raw_file_path
+                    SELECT video_id, MIN(file_path) AS raw_file_path
                     FROM video_files
                     WHERE file_type = 'RAW'
                     GROUP BY video_id
@@ -380,9 +443,7 @@ public class VideoRepository {
                 FROM videos v
                 INNER JOIN video_batches b ON b.id = v.batch_id
                 LEFT JOIN (
-                    SELECT
-                        video_id,
-                        MIN(file_path) AS raw_file_path
+                    SELECT video_id, MIN(file_path) AS raw_file_path
                     FROM video_files
                     WHERE file_type = 'RAW'
                     GROUP BY video_id
@@ -428,9 +489,7 @@ public class VideoRepository {
                 FROM videos v
                 INNER JOIN video_batches b ON b.id = v.batch_id
                 LEFT JOIN (
-                    SELECT
-                        video_id,
-                        MIN(file_path) AS raw_file_path
+                    SELECT video_id, MIN(file_path) AS raw_file_path
                     FROM video_files
                     WHERE file_type = 'RAW'
                     GROUP BY video_id
@@ -594,7 +653,6 @@ public class VideoRepository {
         String name = fileName.trim();
 
         int dotIndex = name.lastIndexOf(".");
-
         if (dotIndex > 0) {
             name = name.substring(0, dotIndex);
         }
