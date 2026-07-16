@@ -18,10 +18,16 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class SourceHealthCheckService {
+
+    /*
+     * Kiểm tra source không cần đếm chính xác vô hạn.
+     * Chỉ cần biết còn ít hay còn rất nhiều video chưa tải.
+     * Khi đã thấy đủ 500 video chưa tải, tool sẽ dừng yt-dlp để tránh quét quá lâu.
+     */
+    private static final int NOT_YET_DOWNLOADED_LIMIT = 500;
+    private static final int CHECK_TIMEOUT_SECONDS = 300;
 
     public List<SourceCheckResult> findActiveSourcesForCheck() {
         try (Connection connection = DatabaseManager.getConnection()) {
@@ -47,15 +53,13 @@ public class SourceHealthCheckService {
 
             if (fanpagesTableExists) {
                 sqlBuilder.append("""
-                        ,
-                        f.page_code,
-                        f.page_name
+                        , f.page_code,
+                          f.page_name
                         """);
             } else {
                 sqlBuilder.append("""
-                        ,
-                        '' AS page_code,
-                        '' AS page_name
+                        , '' AS page_code,
+                          '' AS page_name
                         """);
             }
 
@@ -150,63 +154,107 @@ public class SourceHealthCheckService {
 
         Set<String> downloadedIds = findDownloadedVideoIds(source.getSourceId());
 
-        List<String> command = List.of(
-                ytDlpFile.toAbsolutePath().toString(),
-                "--flat-playlist",
-                "--dump-json",
-                "--no-warnings",
-                "--ignore-errors",
-                source.getSourceUrl()
-        );
+        List<String> command = new ArrayList<>();
+        command.add(ytDlpFile.toAbsolutePath().toString());
+        command.add("--flat-playlist");
+        command.add("--print");
+        command.add("%(id)s");
+        command.add("--no-warnings");
+        command.add("--ignore-errors");
+        command.add(source.getSourceUrl());
 
-        CommandResult commandResult = runCommand(
+        SourceScanResult scanResult = runScanCommand(
                 command,
                 ytDlpFile.getParent(),
-                300
+                CHECK_TIMEOUT_SECONDS,
+                downloadedIds
         );
 
-        Set<String> scannedVideoIds = extractVideoIdsFromYtDlpOutput(commandResult.output());
-
-        int totalFound = scannedVideoIds.size();
-        int alreadyDownloaded = 0;
-
-        for (String videoId : scannedVideoIds) {
-            if (downloadedIds.contains(videoId)) {
-                alreadyDownloaded++;
-            }
-        }
-
-        int notYetDownloaded = totalFound - alreadyDownloaded;
+        int totalFound = scanResult.totalFoundCount();
+        int alreadyDownloaded = scanResult.alreadyDownloadedCount();
+        int notYetDownloaded = scanResult.notYetDownloadedCount();
 
         String status;
         String message;
 
-        if (commandResult.timeout()) {
-            status = "Quá lâu";
-            message = "Lệnh kiểm tra chạy quá 300 giây nên đã bị dừng.\n"
-                    + "Source này có thể quá nhiều video hoặc mạng đang chậm.\n\n"
-                    + shortOutput(commandResult.output());
-        } else if (totalFound > 0 && commandResult.exitCode() == 0) {
+        if (scanResult.limitReached()) {
             status = "OK";
             message = "Source kiểm tra OK.\n"
-                    + "Tổng video quét được: " + totalFound + "\n"
-                    + "Đã có trong DB: " + alreadyDownloaded + "\n"
-                    + "Chưa tải: " + notYetDownloaded;
+                    + "Tool đã dừng quét sớm vì đã tìm được từ "
+                    + NOT_YET_DOWNLOADED_LIMIT
+                    + " video chưa tải trở lên.\n"
+                    + "Không cần quét hết kênh để tránh chạy quá lâu.\n\n"
+                    + "Tổng video đã quét: "
+                    + totalFound
+                    + "\n"
+                    + "Đã có trong DB: "
+                    + alreadyDownloaded
+                    + "\n"
+                    + "Chưa tải: từ "
+                    + NOT_YET_DOWNLOADED_LIMIT
+                    + " video trở lên.";
+
+            return source.withCheckResult(
+                    status,
+                    totalFound,
+                    alreadyDownloaded,
+                    NOT_YET_DOWNLOADED_LIMIT,
+                    message
+            );
+        }
+
+        if (scanResult.timeout()) {
+            status = "Quá lâu";
+            message = "Lệnh kiểm tra chạy quá "
+                    + CHECK_TIMEOUT_SECONDS
+                    + " giây nên đã bị dừng.\n"
+                    + "Kết quả bên dưới chỉ là phần đã quét được trước khi dừng.\n\n"
+                    + "Tổng video đã quét: "
+                    + totalFound
+                    + "\n"
+                    + "Đã có trong DB: "
+                    + alreadyDownloaded
+                    + "\n"
+                    + "Chưa tải: "
+                    + notYetDownloaded
+                    + "\n\n"
+                    + shortOutput(scanResult.output());
+
+        } else if (totalFound > 0 && scanResult.exitCode() == 0) {
+            status = "OK";
+            message = "Source kiểm tra OK.\n"
+                    + "Tổng video quét được: "
+                    + totalFound
+                    + "\n"
+                    + "Đã có trong DB: "
+                    + alreadyDownloaded
+                    + "\n"
+                    + "Chưa tải: "
+                    + notYetDownloaded;
+
         } else if (totalFound > 0) {
             status = "Cảnh báo";
             message = "Có quét được video nhưng yt-dlp trả về exit code: "
-                    + commandResult.exitCode()
+                    + scanResult.exitCode()
                     + "\n\n"
-                    + "Tổng video quét được: " + totalFound + "\n"
-                    + "Đã có trong DB: " + alreadyDownloaded + "\n"
-                    + "Chưa tải: " + notYetDownloaded + "\n\n"
-                    + shortOutput(commandResult.output());
+                    + "Tổng video quét được: "
+                    + totalFound
+                    + "\n"
+                    + "Đã có trong DB: "
+                    + alreadyDownloaded
+                    + "\n"
+                    + "Chưa tải: "
+                    + notYetDownloaded
+                    + "\n\n"
+                    + shortOutput(scanResult.output());
+
         } else {
             status = "Lỗi";
             message = "Không quét được video nào từ source này.\n"
-                    + "Exit code: " + commandResult.exitCode()
+                    + "Exit code: "
+                    + scanResult.exitCode()
                     + "\n\n"
-                    + shortOutput(commandResult.output());
+                    + shortOutput(scanResult.output());
         }
 
         return source.withCheckResult(
@@ -267,36 +315,20 @@ public class SourceHealthCheckService {
         }
     }
 
-    private Set<String> extractVideoIdsFromYtDlpOutput(String output) {
-        Set<String> ids = new LinkedHashSet<>();
-
-        if (output == null || output.isBlank()) {
-            return ids;
-        }
-
-        Pattern pattern = Pattern.compile(
-                "\"id\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\""
-        );
-
-        Matcher matcher = pattern.matcher(output);
-
-        while (matcher.find()) {
-            String id = unescapeJsonString(matcher.group(1));
-
-            if (id != null && !id.isBlank()) {
-                ids.add(id.trim());
-            }
-        }
-
-        return ids;
-    }
-
-    private CommandResult runCommand(
+    private SourceScanResult runScanCommand(
             List<String> command,
             Path workingDirectory,
-            int timeoutSeconds
+            int timeoutSeconds,
+            Set<String> downloadedIds
     ) {
+        Set<String> scannedIds = new LinkedHashSet<>();
         StringBuilder outputBuilder = new StringBuilder();
+
+        Process process = null;
+        int alreadyDownloadedCount = 0;
+        int notYetDownloadedCount = 0;
+        boolean limitReached = false;
+        boolean timeout = false;
 
         try {
             ProcessBuilder processBuilder = new ProcessBuilder(command);
@@ -306,89 +338,196 @@ public class SourceHealthCheckService {
                 processBuilder.directory(workingDirectory.toFile());
             }
 
-            Process process = processBuilder.start();
+            processBuilder.environment().put("PYTHONIOENCODING", "utf-8");
+            processBuilder.environment().put("PYTHONUTF8", "1");
 
-            Thread outputReaderThread = new Thread(() -> {
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)
-                )) {
-                    String line;
-
-                    while ((line = reader.readLine()) != null) {
-                        outputBuilder.append(line).append(System.lineSeparator());
-                    }
-
-                } catch (IOException exception) {
-                    outputBuilder.append("Không đọc được output: ")
-                            .append(exception.getMessage())
-                            .append(System.lineSeparator());
-                }
-            });
-
-            outputReaderThread.setDaemon(true);
-            outputReaderThread.start();
+            process = processBuilder.start();
 
             long startTime = System.currentTimeMillis();
             long timeoutMillis = timeoutSeconds * 1000L;
-            boolean timeout = false;
 
-            while (process.isAlive()) {
-                long runningMillis = System.currentTimeMillis() - startTime;
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)
+            )) {
+                while (true) {
+                    boolean readSomething = false;
 
-                if (runningMillis >= timeoutMillis) {
-                    timeout = true;
-                    process.destroy();
+                    while (reader.ready()) {
+                        String line = reader.readLine();
 
-                    try {
-                        Thread.sleep(300);
-                    } catch (InterruptedException interruptedException) {
-                        Thread.currentThread().interrupt();
+                        if (line == null) {
+                            break;
+                        }
+
+                        readSomething = true;
+                        appendLimitedOutput(outputBuilder, line);
+
+                        String videoId = extractVideoIdFromPrintedLine(line);
+
+                        if (videoId == null || videoId.isBlank()) {
+                            continue;
+                        }
+
+                        if (!scannedIds.add(videoId)) {
+                            continue;
+                        }
+
+                        if (downloadedIds != null && downloadedIds.contains(videoId)) {
+                            alreadyDownloadedCount++;
+                        } else {
+                            notYetDownloadedCount++;
+                        }
+
+                        if (notYetDownloadedCount >= NOT_YET_DOWNLOADED_LIMIT) {
+                            limitReached = true;
+                            destroyProcess(process);
+                            break;
+                        }
                     }
 
-                    if (process.isAlive()) {
-                        process.destroyForcibly();
+                    if (limitReached) {
+                        break;
                     }
 
-                    break;
-                }
+                    if (!process.isAlive()) {
+                        String line;
 
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException interruptedException) {
-                    Thread.currentThread().interrupt();
+                        while ((line = reader.readLine()) != null) {
+                            appendLimitedOutput(outputBuilder, line);
 
-                    if (process.isAlive()) {
-                        process.destroyForcibly();
+                            String videoId = extractVideoIdFromPrintedLine(line);
+
+                            if (videoId == null || videoId.isBlank()) {
+                                continue;
+                            }
+
+                            if (!scannedIds.add(videoId)) {
+                                continue;
+                            }
+
+                            if (downloadedIds != null && downloadedIds.contains(videoId)) {
+                                alreadyDownloadedCount++;
+                            } else {
+                                notYetDownloadedCount++;
+                            }
+
+                            if (notYetDownloadedCount >= NOT_YET_DOWNLOADED_LIMIT) {
+                                limitReached = true;
+                                break;
+                            }
+                        }
+
+                        break;
                     }
 
-                    return new CommandResult(
-                            -1,
-                            outputBuilder.toString() + "\nLệnh bị ngắt khi đang chạy.",
-                            false
-                    );
+                    long runningMillis = System.currentTimeMillis() - startTime;
+
+                    if (runningMillis >= timeoutMillis) {
+                        timeout = true;
+                        destroyProcess(process);
+                        break;
+                    }
+
+                    if (!readSomething) {
+                        Thread.sleep(100);
+                    }
                 }
             }
 
-            try {
-                outputReaderThread.join(1000);
-            } catch (InterruptedException interruptedException) {
-                Thread.currentThread().interrupt();
+            int exitCode;
+
+            if (timeout || limitReached) {
+                exitCode = -1;
+            } else {
+                exitCode = process.exitValue();
             }
 
-            int exitCode = timeout ? -1 : process.exitValue();
-
-            return new CommandResult(
+            return new SourceScanResult(
                     exitCode,
                     outputBuilder.toString(),
-                    timeout
+                    timeout,
+                    limitReached,
+                    scannedIds.size(),
+                    alreadyDownloadedCount,
+                    notYetDownloadedCount
             );
 
         } catch (Exception exception) {
-            return new CommandResult(
+            if (process != null && process.isAlive()) {
+                destroyProcess(process);
+            }
+
+            return new SourceScanResult(
                     -1,
                     outputBuilder + "\n" + exception.getMessage(),
-                    false
+                    false,
+                    limitReached,
+                    scannedIds.size(),
+                    alreadyDownloadedCount,
+                    notYetDownloadedCount
             );
+        }
+    }
+
+    private String extractVideoIdFromPrintedLine(String line) {
+        if (line == null) {
+            return "";
+        }
+
+        String cleanLine = line.trim();
+
+        if (cleanLine.isBlank()) {
+            return "";
+        }
+
+        String lowerLine = cleanLine.toLowerCase();
+
+        if (lowerLine.startsWith("warning:")
+                || lowerLine.startsWith("error:")
+                || lowerLine.startsWith("[")
+                || lowerLine.contains("unable to")
+                || lowerLine.contains("http error")) {
+            return "";
+        }
+
+        /*
+         * yt-dlp --print "%(id)s" chỉ in ID, nhưng vẫn lọc nhẹ để tránh nhầm
+         * các dòng log/error thành video ID.
+         */
+        if (!cleanLine.matches("[A-Za-z0-9_-]{4,80}")) {
+            return "";
+        }
+
+        return cleanLine;
+    }
+
+    private void appendLimitedOutput(StringBuilder outputBuilder, String line) {
+        if (line == null) {
+            return;
+        }
+
+        if (outputBuilder.length() >= 4000) {
+            return;
+        }
+
+        outputBuilder.append(line).append(System.lineSeparator());
+    }
+
+    private void destroyProcess(Process process) {
+        if (process == null || !process.isAlive()) {
+            return;
+        }
+
+        process.destroy();
+
+        try {
+            Thread.sleep(300);
+        } catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+        }
+
+        if (process.isAlive()) {
+            process.destroyForcibly();
         }
     }
 
@@ -444,27 +583,18 @@ public class SourceHealthCheckService {
         }
 
         return cleanOutput.substring(0, 2000)
-                + "\n\n... Output quá dài nên đã rút gọn.";
+                + "\n\n..."
+                + "\nOutput quá dài nên đã rút gọn.";
     }
 
-    private String unescapeJsonString(String text) {
-        if (text == null) {
-            return "";
-        }
-
-        return text
-                .replace("\\/", "/")
-                .replace("\\\"", "\"")
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace("\\\\", "\\");
-    }
-
-    private record CommandResult(
+    private record SourceScanResult(
             int exitCode,
             String output,
-            boolean timeout
+            boolean timeout,
+            boolean limitReached,
+            int totalFoundCount,
+            int alreadyDownloadedCount,
+            int notYetDownloadedCount
     ) {
     }
 }
