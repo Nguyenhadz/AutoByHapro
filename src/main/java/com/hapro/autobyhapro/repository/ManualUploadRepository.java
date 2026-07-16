@@ -181,6 +181,42 @@ public class ManualUploadRepository {
         }
     }
 
+    public List<String> findUploadedMarkedFilePaths(Long videoBatchId) {
+        if (videoBatchId == null) {
+            throw new RuntimeException("Video batch ID đang bị trống.");
+        }
+
+        String sql = """
+                SELECT vf.file_path
+                FROM video_files vf
+                INNER JOIN videos v ON v.id = vf.video_id
+                WHERE v.batch_id = ?
+                  AND v.status = 'UPLOADED_MARKED'
+                  AND vf.file_path IS NOT NULL
+                  AND TRIM(vf.file_path) <> ''
+                ORDER BY vf.id ASC
+                """;
+
+        List<String> filePaths = new ArrayList<>();
+
+        try (Connection connection = DatabaseManager.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            preparedStatement.setLong(1, videoBatchId);
+
+            try (ResultSet resultSet = preparedStatement.executeQuery()) {
+                while (resultSet.next()) {
+                    filePaths.add(resultSet.getString("file_path"));
+                }
+            }
+
+            return filePaths;
+
+        } catch (SQLException exception) {
+            throw new RuntimeException("Không thể lấy danh sách file cần dọn sau upload.", exception);
+        }
+    }
+
     public CleanupDatabaseResult cleanupUploadedBatchInDatabase(Long videoBatchId) {
         if (videoBatchId == null) {
             throw new RuntimeException("Video batch ID đang bị trống.");

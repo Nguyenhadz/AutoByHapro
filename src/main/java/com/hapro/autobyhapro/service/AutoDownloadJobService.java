@@ -481,6 +481,17 @@ public class AutoDownloadJobService {
                 80
         );
 
+        /*
+         * Từ bản này trở đi, file RAW và EDITED không còn chia vào folder batch.
+         * Mỗi fanpage chỉ có 1 folder raw và 1 folder edited:
+         *
+         * video/raw/P001_Ten_Page/
+         * video/edited/P001_Ten_Page/
+         *
+         * Bảng video_batches vẫn được giữ để tool còn quản lý trạng thái upload,
+         * nhưng raw_folder_path và edited_folder_path của mọi batch trong page
+         * đều trỏ về folder page chung.
+         */
         Path pageRawFolder = AppPaths.RAW_DIR.resolve(pageFolderName);
         Path pageEditedFolder = AppPaths.EDITED_DIR.resolve(pageFolderName);
 
@@ -505,12 +516,6 @@ public class AutoDownloadJobService {
                     batchIndex
             );
 
-            Path rawBatchFolder = pageRawFolder.resolve(batchCode);
-            Path editedBatchFolder = pageEditedFolder.resolve(batchCode);
-
-            createDirectory(rawBatchFolder);
-            createDirectory(editedBatchFolder);
-
             long videoBatchId = downloadPlanRepository.createVideoBatch(
                     batchCode,
                     target.getFanpageId(),
@@ -518,16 +523,16 @@ public class AutoDownloadJobService {
                     downloadBatchId,
                     batchIndex,
                     batchVideoCount,
-                    rawBatchFolder.toAbsolutePath().toString(),
-                    editedBatchFolder.toAbsolutePath().toString()
+                    pageRawFolder.toAbsolutePath().toString(),
+                    pageEditedFolder.toAbsolutePath().toString()
             );
 
             VideoBatchFolder videoBatchFolder = new VideoBatchFolder(
                     videoBatchId,
                     batchCode,
                     batchVideoCount,
-                    rawBatchFolder,
-                    editedBatchFolder
+                    pageRawFolder,
+                    pageEditedFolder
             );
 
             videoBatchFolders.add(videoBatchFolder);

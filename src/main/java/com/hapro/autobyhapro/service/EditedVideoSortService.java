@@ -106,7 +106,7 @@ public class EditedVideoSortService {
         }
 
         try {
-            Path editedFolder = Path.of(target.getEditedFolderPath());
+            Path editedFolder = resolveEditedFolderByRawFolder(target);
             Files.createDirectories(editedFolder);
 
             String destinationFileName = buildDestinationFileName(
@@ -154,6 +154,51 @@ public class EditedVideoSortService {
                     "FAILED",
                     exception.getMessage()
             );
+        }
+    }
+
+
+    private Path resolveEditedFolderByRawFolder(EditedVideoTarget target) {
+        if (target == null) {
+            return AppPaths.EDITED_UNKNOWN_DIR;
+        }
+
+        String rawFilePath = target.getRawFilePath();
+
+        if (rawFilePath == null || rawFilePath.isBlank()) {
+            return Path.of(target.getEditedFolderPath());
+        }
+
+        try {
+            Path rawFile = Path.of(rawFilePath).toAbsolutePath().normalize();
+            Path rawRoot = AppPaths.RAW_DIR.toAbsolutePath().normalize();
+            Path rawFolder = rawFile.getParent();
+
+            if (rawFolder == null || !rawFolder.startsWith(rawRoot)) {
+                return Path.of(target.getEditedFolderPath());
+            }
+
+            Path relativeFolder = rawRoot.relativize(rawFolder);
+
+            if (relativeFolder.getNameCount() <= 0) {
+                return Path.of(target.getEditedFolderPath());
+            }
+
+            /*
+             * Phân loại theo folder RAW của page.
+             * Nếu raw cũ từng nằm trong raw/Page/Batch/file.mp4,
+             * vẫn chỉ lấy cấp đầu tiên là Page để đưa về edited/Page/.
+             */
+            String pageFolderName = relativeFolder.getName(0).toString();
+
+            if (pageFolderName.isBlank()) {
+                return Path.of(target.getEditedFolderPath());
+            }
+
+            return AppPaths.EDITED_DIR.resolve(pageFolderName);
+
+        } catch (Exception exception) {
+            return Path.of(target.getEditedFolderPath());
         }
     }
 
