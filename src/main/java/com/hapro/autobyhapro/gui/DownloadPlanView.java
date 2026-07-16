@@ -1,15 +1,14 @@
 package com.hapro.autobyhapro.gui;
 
+import com.hapro.autobyhapro.config.AppPaths;
 import com.hapro.autobyhapro.entity.AutoDownloadJobResult;
 import com.hapro.autobyhapro.entity.AutoDownloadPageResult;
 import com.hapro.autobyhapro.entity.DownloadPlanGuiRow;
 import com.hapro.autobyhapro.entity.DownloadTarget;
-import com.hapro.autobyhapro.entity.VideoBatchFolder;
 import com.hapro.autobyhapro.entity.VideoCandidate;
 import com.hapro.autobyhapro.entity.VideoDownloadItemResult;
 import com.hapro.autobyhapro.service.AutoDownloadJobService;
 import com.hapro.autobyhapro.service.DownloadPlanGuiService;
-import com.hapro.autobyhapro.config.AppPaths;
 import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -27,39 +26,34 @@ import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
+import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
-import javafx.scene.control.cell.CheckBoxTableCell;
-import javafx.scene.control.TextField;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 
 public class DownloadPlanView {
 
-    private final DownloadPlanGuiService downloadPlanGuiService =
-            new DownloadPlanGuiService();
-
-    private final AutoDownloadJobService autoDownloadJobService =
-            new AutoDownloadJobService();
+    private final DownloadPlanGuiService downloadPlanGuiService = new DownloadPlanGuiService();
+    private final AutoDownloadJobService autoDownloadJobService = new AutoDownloadJobService();
 
     private final ScrollPane rootScrollPane = new ScrollPane();
     private final VBox root = new VBox(14);
-
     private final TableView<DownloadPlanGuiRow> tableView = new TableView<>();
     private final TextArea resultArea = new TextArea();
     private final Label statusLabel = new Label("Sẵn sàng.");
-
     private final TextField threadCountField = new TextField("1");
-
     private final CheckBox selectAllHeaderCheckBox = new CheckBox();
-    private final ObservableList<DownloadPlanGuiRow> tableItems =
-            FXCollections.observableArrayList();
+
+    private final ObservableList<DownloadPlanGuiRow> tableItems = FXCollections.observableArrayList();
 
     public DownloadPlanView() {
         buildLayout();
@@ -120,8 +114,8 @@ public class DownloadPlanView {
         threadCountField.setPrefWidth(110);
         threadCountField.setMaxWidth(120);
         threadCountField.setStyle("""
-        -fx-font-size: 13px;
-        """);
+                -fx-font-size: 13px;
+                """);
 
         Button refreshButton = secondaryButton("Refresh");
         refreshButton.setOnAction(event -> loadRows());
@@ -137,9 +131,9 @@ public class DownloadPlanView {
 
         Label threadCountLabel = new Label("Số luồng tải:");
         threadCountLabel.setStyle("""
-        -fx-font-size: 13px;
-        -fx-text-fill: #374151;
-        """);
+                -fx-font-size: 13px;
+                -fx-text-fill: #374151;
+                """);
 
         headerBox.getChildren().addAll(
                 cardTitle,
@@ -153,7 +147,9 @@ public class DownloadPlanView {
         );
 
         Label noteLabel = note(
-                "Số luồng tải mặc định là 1. Có thể nhập tùy ý, ví dụ 1, 2, 3, 5. Nên test ít luồng trước để tránh mạng hoặc SQLite bị quá tải."
+                "Số luồng tải mặc định là 1.\n"
+                        + "Có thể nhập tùy ý, ví dụ 1, 2, 3, 5.\n"
+                        + "Nên test ít luồng trước để tránh mạng hoặc SQLite bị quá tải."
         );
 
         buildTableColumns();
@@ -255,7 +251,6 @@ public class DownloadPlanView {
             selectAllHeaderCheckBox.setIndeterminate(false);
             setAllSelected(selected);
         });
-
         selectedColumn.setGraphic(selectAllHeaderCheckBox);
 
         TableColumn<DownloadPlanGuiRow, String> pageColumn = new TableColumn<>("Fanpage");
@@ -429,9 +424,11 @@ public class DownloadPlanView {
         );
 
         statusLabel.setText("Đang download...");
-        resultArea.setText(beforeRunText
-                + "\n\nĐANG CHẠY DOWNLOAD..."
-                + "\nKhông tắt tool trong lúc đang tải.");
+        resultArea.setText(
+                beforeRunText
+                        + "\n\nĐANG CHẠY DOWNLOAD..."
+                        + "\nKhông tắt tool trong lúc đang tải."
+        );
 
         startDownloadButton.setDisable(true);
 
@@ -449,16 +446,27 @@ public class DownloadPlanView {
         task.setOnSucceeded(event -> {
             AutoDownloadJobResult result = task.getValue();
 
-            statusLabel.setText("Download hoàn tất.");
-            resultArea.setText(buildJobResultText(result));
+            boolean hasProblemPage = hasProblemPage(result);
 
+            if (!hasProblemPage) {
+                statusLabel.setText("Download hoàn tất: tất cả source đã đủ số lượng yêu cầu.");
+            } else {
+                statusLabel.setText("Download hoàn tất: có source tải chưa đủ số lượng.");
+            }
+
+            resultArea.setText(buildJobResultText(result));
             startDownloadButton.setDisable(false);
 
             GuiAlert.info(
                     "Download hoàn tất",
-                    "Tổng video tải thành công: " + result.getTotalDownloadedCount()
-                            + "\nTải thất bại: " + result.getTotalFailedCount()
-                            + "\nFolder batch đã tạo: " + result.getTotalFolderCount()
+                    "Tổng video tải thành công: "
+                            + result.getTotalDownloadedCount()
+                            + "\nVideo lỗi đã lưu DB / bỏ qua: "
+                            + result.getTotalFailedCount()
+                            + "\nSource tải chưa đủ: "
+                            + countProblemPages(result)
+                            + "\nFolder batch đã tạo: "
+                            + result.getTotalFolderCount()
             );
         });
 
@@ -538,55 +546,93 @@ public class DownloadPlanView {
     private String buildJobResultText(AutoDownloadJobResult result) {
         StringBuilder builder = new StringBuilder();
 
+        int problemPageCount = countProblemPages(result);
+        int successPageCount = result.getTotalPages() - problemPageCount;
+
         builder.append("KẾT QUẢ DOWNLOAD")
                 .append(System.lineSeparator());
         builder.append("================")
                 .append(System.lineSeparator());
-
         builder.append("Số luồng đã chọn: ")
                 .append(result.getThreadCount())
                 .append(System.lineSeparator());
-
-        builder.append("Tổng page xử lý: ")
+        builder.append("Tổng source xử lý: ")
                 .append(result.getTotalPages())
                 .append(System.lineSeparator());
-
+        builder.append("Source thành công: ")
+                .append(successPageCount)
+                .append(System.lineSeparator());
+        builder.append("Source tải chưa đủ: ")
+                .append(problemPageCount)
+                .append(System.lineSeparator());
         builder.append("Tổng video yêu cầu: ")
                 .append(result.getTotalRequestedCount())
                 .append(System.lineSeparator());
-
         builder.append("Tổng video mới tìm được: ")
                 .append(result.getTotalFoundNewCount())
                 .append(System.lineSeparator());
-
         builder.append("Tổng video tải thành công: ")
                 .append(result.getTotalDownloadedCount())
                 .append(System.lineSeparator());
-
-        builder.append("Tổng video tải thất bại: ")
+        builder.append("Tổng video lỗi đã lưu DB / bỏ qua khi tải: ")
                 .append(result.getTotalFailedCount())
                 .append(System.lineSeparator());
-
         builder.append("Tổng folder batch đã tạo: ")
                 .append(result.getTotalFolderCount())
                 .append(System.lineSeparator())
                 .append(System.lineSeparator());
 
-        for (AutoDownloadPageResult pageResult : result.getPageResults()) {
-            builder.append(buildPageResultText(pageResult))
+        if (problemPageCount == 0) {
+            builder.append("✅ TẤT CẢ SOURCE ĐÃ TẢI ĐỦ SỐ LƯỢNG YÊU CẦU.")
                     .append(System.lineSeparator());
+
+            if (result.getTotalFailedCount() > 0) {
+                builder.append("Có ")
+                        .append(result.getTotalFailedCount())
+                        .append(" video bị lỗi/không khả dụng trong lúc tải, nhưng tool đã lưu các video đó vào DB để lần sau bỏ qua.")
+                        .append(System.lineSeparator());
+                builder.append("Vì các source vẫn tải đủ số lượng yêu cầu nên không hiển thị log lỗi chi tiết.")
+                        .append(System.lineSeparator());
+            } else {
+                builder.append("Không có source tải thiếu nên tool đã ẩn log chi tiết từng page cho dễ nhìn.")
+                        .append(System.lineSeparator());
+            }
+
+            return builder.toString();
+        }
+
+        builder.append("⚠ SOURCE TẢI CHƯA ĐỦ SỐ LƯỢNG")
+                .append(System.lineSeparator());
+        builder.append("Chỉ những source tải không đủ số lượng yêu cầu mới hiển thị bên dưới.")
+                .append(System.lineSeparator())
+                .append(System.lineSeparator());
+
+        int index = 1;
+
+        for (Object object : result.getPageResults()) {
+            AutoDownloadPageResult pageResult = (AutoDownloadPageResult) object;
+
+            if (!isProblemPage(pageResult)) {
+                continue;
+            }
+
+            builder.append(buildProblemPageResultText(index, pageResult))
+                    .append(System.lineSeparator());
+
+            index++;
         }
 
         return builder.toString();
     }
 
-    private String buildPageResultText(AutoDownloadPageResult result) {
+    private String buildProblemPageResultText(int index, AutoDownloadPageResult result) {
         StringBuilder builder = new StringBuilder();
 
         builder.append("------------------------------------")
                 .append(System.lineSeparator());
-
-        builder.append(result.getTarget().getFanpageCode())
+        builder.append(index)
+                .append(". ")
+                .append(result.getTarget().getFanpageCode())
                 .append(" - ")
                 .append(result.getTarget().getFanpageName())
                 .append(System.lineSeparator());
@@ -597,32 +643,32 @@ public class DownloadPlanView {
                 .append(emptyToDash(result.getTarget().getSourceName()))
                 .append(System.lineSeparator());
 
+        builder.append("Loại: ")
+                .append(emptyToDash(result.getTarget().getSourceType()))
+                .append(System.lineSeparator());
+
+        builder.append("Link: ")
+                .append(emptyToDash(result.getTarget().getSourceUrl()))
+                .append(System.lineSeparator());
+
         builder.append("Trạng thái: ")
                 .append(emptyToDash(result.getStatus()))
                 .append(System.lineSeparator());
 
         builder.append("Yêu cầu: ")
                 .append(result.getRequestedCount())
+                .append(" | Tải thành công: ")
+                .append(result.getDownloadedCount())
+                .append(" | Lỗi/bỏ qua: ")
+                .append(result.getFailedCount())
                 .append(System.lineSeparator());
 
         builder.append("Đã quét từ source: ")
                 .append(result.getScannedCount())
-                .append(System.lineSeparator());
-
-        builder.append("Đã có trong DB, bỏ qua: ")
+                .append(" | Đã có trong DB, bỏ qua: ")
                 .append(result.getSkippedExistingCount())
-                .append(System.lineSeparator());
-
-        builder.append("Video mới tìm được: ")
+                .append(" | Video mới tìm được: ")
                 .append(result.getFoundNewCount())
-                .append(System.lineSeparator());
-
-        builder.append("Tải thành công: ")
-                .append(result.getDownloadedCount())
-                .append(System.lineSeparator());
-
-        builder.append("Tải thất bại: ")
-                .append(result.getFailedCount())
                 .append(System.lineSeparator());
 
         builder.append("Thông báo: ")
@@ -635,59 +681,116 @@ public class DownloadPlanView {
                     .append(System.lineSeparator());
         }
 
-        if (!result.getVideoBatchFolders().isEmpty()) {
-            builder.append(System.lineSeparator());
-            builder.append("Folder batch:")
-                    .append(System.lineSeparator());
-
-            for (VideoBatchFolder folder : result.getVideoBatchFolders()) {
-                builder.append("- ")
-                        .append(folder.getBatchCode())
-                        .append(" | ")
-                        .append(folder.getVideoCount())
-                        .append(" video")
-                        .append(System.lineSeparator());
-
-                builder.append("  Raw: ")
-                        .append(folder.getRawFolderPath().toAbsolutePath())
-                        .append(System.lineSeparator());
-
-                builder.append("  Edited: ")
-                        .append(folder.getEditedFolderPath().toAbsolutePath())
-                        .append(System.lineSeparator());
-            }
-        }
-
-        if (!result.getDownloadItemResults().isEmpty()) {
-            builder.append(System.lineSeparator());
-            builder.append("Chi tiết tải video:")
-                    .append(System.lineSeparator());
-
-            for (VideoDownloadItemResult item : result.getDownloadItemResults()) {
-                VideoCandidate video = item.getVideo();
-
-                builder.append(item.isSuccess() ? "OK" : "FAIL")
-                        .append(" | ")
-                        .append(emptyToDash(item.getBatchCode()))
-                        .append(" | ")
-                        .append(shorten(video.getVideoId(), 18))
-                        .append(" | ")
-                        .append(shorten(video.getTitle(), 55))
-                        .append(System.lineSeparator());
-
-                if (item.isSuccess()) {
-                    builder.append("     File: ")
-                            .append(emptyToDash(item.getFilePath()))
-                            .append(System.lineSeparator());
-                } else {
-                    builder.append("     Lỗi: ")
-                            .append(emptyToDash(item.getMessage()))
-                            .append(System.lineSeparator());
-                }
-            }
-        }
+        appendFailedVideoDetails(builder, result);
 
         return builder.toString();
+    }
+
+    private void appendFailedVideoDetails(StringBuilder builder, AutoDownloadPageResult result) {
+        if (result.getDownloadItemResults() == null || result.getDownloadItemResults().isEmpty()) {
+            return;
+        }
+
+        boolean hasFailedItem = false;
+
+        for (Object object : result.getDownloadItemResults()) {
+            VideoDownloadItemResult item = (VideoDownloadItemResult) object;
+
+            if (!item.isSuccess()) {
+                hasFailedItem = true;
+                break;
+            }
+        }
+
+        if (!hasFailedItem) {
+            return;
+        }
+
+        builder.append(System.lineSeparator());
+        builder.append("Video lỗi / bị bỏ qua:")
+                .append(System.lineSeparator());
+
+        for (Object object : result.getDownloadItemResults()) {
+            VideoDownloadItemResult item = (VideoDownloadItemResult) object;
+
+            if (item.isSuccess()) {
+                continue;
+            }
+
+            VideoCandidate video = item.getVideo();
+
+            builder.append("- ")
+                    .append(shorten(video.getVideoId(), 18))
+                    .append(" | ")
+                    .append(shorten(video.getTitle(), 70))
+                    .append(System.lineSeparator());
+
+            builder.append("  Lỗi: ")
+                    .append(shorten(firstUsefulLine(item.getMessage()), 280))
+                    .append(System.lineSeparator());
+        }
+    }
+
+    private boolean hasProblemPage(AutoDownloadJobResult result) {
+        return countProblemPages(result) > 0;
+    }
+
+    private int countProblemPages(AutoDownloadJobResult result) {
+        int count = 0;
+
+        if (result == null || result.getPageResults() == null) {
+            return count;
+        }
+
+        for (Object object : result.getPageResults()) {
+            AutoDownloadPageResult pageResult = (AutoDownloadPageResult) object;
+
+            if (isProblemPage(pageResult)) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private boolean isProblemPage(AutoDownloadPageResult result) {
+        if (result == null) {
+            return true;
+        }
+
+        /*
+         * Chỉ coi source là lỗi khi tải không đủ số lượng yêu cầu.
+         *
+         * Trường hợp đã tải đủ 6/6 nhưng trong quá trình thử có 1-2 video
+         * member-only/private/unavailable bị lỗi thì KHÔNG coi là source lỗi.
+         * Các video đó đã được VideoDownloadService lưu vào DB với status
+         * SKIPPED_UNAVAILABLE để lần sau scanner bỏ qua.
+         */
+        return result.getDownloadedCount() < result.getRequestedCount();
+    }
+
+    private String firstUsefulLine(String message) {
+        if (message == null || message.isBlank()) {
+            return "-";
+        }
+
+        String[] lines = message.split("\\R");
+
+        for (String line : lines) {
+            if (line == null) {
+                continue;
+            }
+
+            String cleanLine = line.trim();
+
+            if (cleanLine.isBlank()) {
+                continue;
+            }
+
+            return cleanLine;
+        }
+
+        return message.trim();
     }
 
     private int readThreadCount() {
@@ -713,6 +816,7 @@ public class DownloadPlanView {
             );
         }
     }
+
     private void setAllSelected(boolean selected) {
         for (DownloadPlanGuiRow row : tableItems) {
             row.setSelected(selected);
