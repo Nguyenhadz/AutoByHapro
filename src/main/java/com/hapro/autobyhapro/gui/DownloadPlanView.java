@@ -461,8 +461,6 @@ public class DownloadPlanView {
                     "Download hoàn tất",
                     "Tổng video tải thành công: "
                             + result.getTotalDownloadedCount()
-                            + "\nVideo lỗi đã lưu DB / bỏ qua: "
-                            + result.getTotalFailedCount()
                             + "\nSource tải chưa đủ: "
                             + countProblemPages(result)
                             + "\nFolder batch đã tạo: "
@@ -574,9 +572,6 @@ public class DownloadPlanView {
         builder.append("Tổng video tải thành công: ")
                 .append(result.getTotalDownloadedCount())
                 .append(System.lineSeparator());
-        builder.append("Tổng video lỗi đã lưu DB / bỏ qua khi tải: ")
-                .append(result.getTotalFailedCount())
-                .append(System.lineSeparator());
         builder.append("Tổng folder batch đã tạo: ")
                 .append(result.getTotalFolderCount())
                 .append(System.lineSeparator())
@@ -585,18 +580,6 @@ public class DownloadPlanView {
         if (problemPageCount == 0) {
             builder.append("✅ TẤT CẢ SOURCE ĐÃ TẢI ĐỦ SỐ LƯỢNG YÊU CẦU.")
                     .append(System.lineSeparator());
-
-            if (result.getTotalFailedCount() > 0) {
-                builder.append("Có ")
-                        .append(result.getTotalFailedCount())
-                        .append(" video bị lỗi/không khả dụng trong lúc tải, nhưng tool đã lưu các video đó vào DB để lần sau bỏ qua.")
-                        .append(System.lineSeparator());
-                builder.append("Vì các source vẫn tải đủ số lượng yêu cầu nên không hiển thị log lỗi chi tiết.")
-                        .append(System.lineSeparator());
-            } else {
-                builder.append("Không có source tải thiếu nên tool đã ẩn log chi tiết từng page cho dễ nhìn.")
-                        .append(System.lineSeparator());
-            }
 
             return builder.toString();
         }
@@ -659,8 +642,6 @@ public class DownloadPlanView {
                 .append(result.getRequestedCount())
                 .append(" | Tải thành công: ")
                 .append(result.getDownloadedCount())
-                .append(" | Lỗi/bỏ qua: ")
-                .append(result.getFailedCount())
                 .append(System.lineSeparator());
 
         builder.append("Đã quét từ source: ")
@@ -680,8 +661,6 @@ public class DownloadPlanView {
                     .append(result.getDownloadBatchId())
                     .append(System.lineSeparator());
         }
-
-        appendFailedVideoDetails(builder, result);
 
         return builder.toString();
     }
