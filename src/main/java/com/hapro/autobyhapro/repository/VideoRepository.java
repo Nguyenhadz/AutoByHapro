@@ -16,6 +16,9 @@ import java.util.StringJoiner;
 
 public class VideoRepository {
 
+    private static final int MIN_ID_CONTAINS_LENGTH = 6;
+    private static final int MIN_NAME_CONTAINS_LENGTH = 8;
+
     public Set<String> findExistingVideoIds(Long sourceId, Collection<String> videoIds) {
         Set<String> existingVideoIds = new HashSet<>();
 
@@ -163,10 +166,6 @@ public class VideoRepository {
             throw new RuntimeException("platformVideoId đang bị trống, không thể lưu video bị bỏ qua.");
         }
 
-        /*
-         * batch_id để NULL để video bị chặn không làm lệch folder/batch upload.
-         * Chỉ cần source_id + platform_video_id nằm trong bảng videos là scanner sẽ bỏ qua ở lần sau.
-         */
         String sql = """
                 INSERT OR IGNORE INTO videos (
                     batch_id,
@@ -217,8 +216,24 @@ public class VideoRepository {
             return null;
         }
 
+        /*
+         * Video ID là khóa chắc nhất, nên ưu tiên tìm global theo platform_video_id trước.
+         * Không phụ thuộc vào batch code nữa.
+         */
+        EditedVideoTarget exactTarget = findEditedVideoTargetByVideoId(cleanVideoId);
+
+        if (exactTarget != null) {
+            return exactTarget;
+        }
+
+        EditedVideoTarget prefixTarget = findEditedVideoTargetByVideoIdPrefix(cleanVideoId);
+
+        if (prefixTarget != null) {
+            return prefixTarget;
+        }
+
         if (!cleanBatchCode.isBlank()) {
-            EditedVideoTarget exactTarget = findEditedVideoTargetByBatchAndVideoId(
+            exactTarget = findEditedVideoTargetByBatchAndVideoId(
                     cleanBatchCode,
                     cleanVideoId
             );
@@ -227,29 +242,90 @@ public class VideoRepository {
                 return exactTarget;
             }
 
-            EditedVideoTarget prefixTarget = findEditedVideoTargetByBatchAndVideoIdPrefix(
+            return findEditedVideoTargetByBatchAndVideoIdPrefix(
                     cleanBatchCode,
                     cleanVideoId
             );
+        }
 
-            if (prefixTarget != null) {
-                return prefixTarget;
+        return null;
+    }
+
+    public EditedVideoTarget findEditedVideoTargetByVideoIdContainedInFileName(String editedFileName) {
+        String editedKey = normalizeForCompare(editedFileName);
+
+        if (editedKey.length() < MIN_ID_CONTAINS_LENGTH) {
+            return null;
+        }
+
+        String sql = """
+                SELECT
+                    v.id AS video_id,
+                    v.batch_id,
+                    v.platform_video_id,
+                    v.title,
+                    v.status,
+                    b.batch_code,
+                    b.edited_folder_path,
+                    raw.raw_file_path
+                FROM videos v
+                INNER JOIN video_batches b ON b.id = v.batch_id
+                LEFT JOIN (
+                    SELECT video_id, MIN(file_path) AS raw_file_path
+                    FROM video_files
+                    WHERE file_type = 'RAW'
+                    GROUP BY video_id
+                ) raw ON raw.video_id = v.id
+                WHERE v.platform_video_id IS NOT NULL
+                  AND v.platform_video_id <> ''
+                ORDER BY v.id DESC
+                """;
+
+        EditedVideoTarget bestTarget = null;
+        int bestScore = -1;
+        boolean ambiguous = false;
+
+        try (Connection connection = DatabaseManager.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(sql);
+             ResultSet resultSet = preparedStatement.executeQuery()) {
+
+            while (resultSet.next()) {
+                String platformVideoId = resultSet.getString("platform_video_id");
+                String videoIdKey = normalizeForCompare(platformVideoId);
+
+                int score = compareVideoIdContainedScore(
+                        videoIdKey,
+                        editedKey
+                );
+
+                if (score <= 0) {
+                    continue;
+                }
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestTarget = mapEditedVideoTarget(resultSet);
+                    ambiguous = false;
+                } else if (score == bestScore) {
+                    ambiguous = true;
+                }
             }
+
+            if (ambiguous) {
+                return null;
+            }
+
+            return bestTarget;
+
+        } catch (SQLException exception) {
+            throw new RuntimeException("Không thể tìm video theo ID nằm trong tên file export.", exception);
         }
-
-        EditedVideoTarget exactTarget = findEditedVideoTargetByVideoId(cleanVideoId);
-
-        if (exactTarget != null) {
-            return exactTarget;
-        }
-
-        return findEditedVideoTargetByVideoIdPrefix(cleanVideoId);
     }
 
     public EditedVideoTarget findEditedVideoTargetByFileNameApprox(String editedFileName) {
         String editedKey = normalizeForCompare(editedFileName);
 
-        if (editedKey.length() < 12) {
+        if (editedKey.length() < MIN_NAME_CONTAINS_LENGTH) {
             return null;
         }
 
@@ -292,7 +368,10 @@ public class VideoRepository {
                 String rawFileName = Path.of(rawFilePath).getFileName().toString();
                 String rawKey = normalizeForCompare(rawFileName);
 
-                int score = comparePrefixScore(rawKey, editedKey);
+                int score = compareFileNameContainedScore(
+                        rawKey,
+                        editedKey
+                );
 
                 if (score <= 0) {
                     continue;
@@ -318,7 +397,39 @@ public class VideoRepository {
         }
     }
 
-    private int comparePrefixScore(String rawKey, String editedKey) {
+    private int compareVideoIdContainedScore(String videoIdKey, String editedKey) {
+        if (videoIdKey == null || editedKey == null) {
+            return -1;
+        }
+
+        if (videoIdKey.length() < MIN_ID_CONTAINS_LENGTH
+                || editedKey.length() < MIN_ID_CONTAINS_LENGTH) {
+            return -1;
+        }
+
+        /*
+         * Case chính:
+         * videoIdKey = 12345678asds
+         * editedKey  = v12345678asds
+         * => editedKey chứa videoIdKey, match chắc.
+         */
+        if (editedKey.contains(videoIdKey)) {
+            return 10000 + videoIdKey.length();
+        }
+
+        /*
+         * Case phụ khi CapCut cắt mất một phần đầu/cuối.
+         * Chỉ cho phép khi chuỗi còn lại đủ dài để giảm rủi ro match nhầm.
+         */
+        if (editedKey.length() >= MIN_NAME_CONTAINS_LENGTH
+                && videoIdKey.contains(editedKey)) {
+            return editedKey.length();
+        }
+
+        return -1;
+    }
+
+    private int compareFileNameContainedScore(String rawKey, String editedKey) {
         if (rawKey == null || editedKey == null) {
             return -1;
         }
@@ -327,11 +438,17 @@ public class VideoRepository {
             return -1;
         }
 
-        if (rawKey.startsWith(editedKey)) {
+        if (rawKey.equals(editedKey)) {
+            return 20000 + rawKey.length();
+        }
+
+        if (editedKey.length() >= MIN_NAME_CONTAINS_LENGTH
+                && rawKey.contains(editedKey)) {
             return editedKey.length();
         }
 
-        if (editedKey.startsWith(rawKey)) {
+        if (rawKey.length() >= MIN_NAME_CONTAINS_LENGTH
+                && editedKey.contains(rawKey)) {
             return rawKey.length();
         }
 
@@ -533,9 +650,15 @@ public class VideoRepository {
     }
 
     private EditedVideoTarget mapEditedVideoTarget(ResultSet resultSet) throws SQLException {
+        long batchId = resultSet.getLong("batch_id");
+
+        if (resultSet.wasNull()) {
+            batchId = 0L;
+        }
+
         return new EditedVideoTarget(
                 resultSet.getLong("video_id"),
-                resultSet.getLong("batch_id"),
+                batchId,
                 resultSet.getString("platform_video_id"),
                 resultSet.getString("title"),
                 resultSet.getString("status"),
@@ -592,6 +715,10 @@ public class VideoRepository {
     }
 
     public void updateVideoBatchStatus(Long videoBatchId, String status) {
+        if (videoBatchId == null || videoBatchId <= 0) {
+            return;
+        }
+
         String sql = """
                 UPDATE video_batches
                 SET status = ?

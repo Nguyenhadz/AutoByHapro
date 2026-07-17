@@ -85,6 +85,11 @@ public class EditedVideoSortService {
 
         EditedVideoTarget target = null;
 
+        /*
+         * Ưu tiên 1:
+         * Nếu tên file còn dạng VID_xxx thì dùng xxx để tìm thẳng platform_video_id trong DB.
+         * Không cần phụ thuộc batch code / D000052B001.
+         */
         if (!videoIdOrPrefix.isBlank()) {
             target = videoRepository.findEditedVideoTarget(
                     batchCode,
@@ -92,6 +97,25 @@ public class EditedVideoSortService {
             );
         }
 
+        /*
+         * Ưu tiên 2:
+         * Nếu CapCut thêm ký tự vào trước ID, ví dụ:
+         * raw/video id: 12345678asds
+         * export:       v12345678asds.mp4
+         * export:       vs12345678asds.mp4
+         *
+         * Tool sẽ quét platform_video_id trong DB và kiểm tra ID đó có nằm
+         * bên trong tên file export không.
+         */
+        if (target == null) {
+            target = videoRepository.findEditedVideoTargetByVideoIdContainedInFileName(fileName);
+        }
+
+        /*
+         * Ưu tiên 3:
+         * Nếu không tìm được theo platform_video_id thì mới thử so gần đúng
+         * với tên file RAW đã lưu trong DB.
+         */
         if (target == null) {
             target = videoRepository.findEditedVideoTargetByFileNameApprox(fileName);
         }
@@ -101,7 +125,8 @@ public class EditedVideoSortService {
                     sourceFile,
                     videoIdOrPrefix,
                     batchCode,
-                    "Không tìm thấy video phù hợp trong database. Có thể tên file bị CapCut cắt quá ngắn hoặc bị trùng gần đúng."
+                    "Không tìm thấy video phù hợp trong database.\n"
+                            + "Có thể file export đã mất video ID, tên bị CapCut cắt quá ngắn hoặc bị trùng gần đúng."
             );
         }
 
@@ -129,10 +154,12 @@ public class EditedVideoSortService {
                     destinationFile.toAbsolutePath().toString()
             );
 
-            videoRepository.updateVideoBatchStatus(
-                    target.getBatchId(),
-                    "READY_UPLOAD"
-            );
+            if (target.getBatchId() != null && target.getBatchId() > 0) {
+                videoRepository.updateVideoBatchStatus(
+                        target.getBatchId(),
+                        "READY_UPLOAD"
+                );
+            }
 
             return new EditedVideoSortItemResult(
                     sourceFile.toAbsolutePath().toString(),
@@ -141,7 +168,7 @@ public class EditedVideoSortService {
                     target.getBatchCode(),
                     true,
                     "READY_UPLOAD",
-                    "Đã phân loại video edit thành công và đổi tên theo tiêu đề nguồn."
+                    "Đã phân loại video edit thành công theo video ID / tên RAW và đổi tên theo tiêu đề nguồn."
             );
 
         } catch (Exception exception) {
@@ -157,7 +184,6 @@ public class EditedVideoSortService {
         }
     }
 
-
     private Path resolveEditedFolderByRawFolder(EditedVideoTarget target) {
         if (target == null) {
             return AppPaths.EDITED_UNKNOWN_DIR;
@@ -170,8 +196,14 @@ public class EditedVideoSortService {
         }
 
         try {
-            Path rawFile = Path.of(rawFilePath).toAbsolutePath().normalize();
-            Path rawRoot = AppPaths.RAW_DIR.toAbsolutePath().normalize();
+            Path rawFile = Path.of(rawFilePath)
+                    .toAbsolutePath()
+                    .normalize();
+
+            Path rawRoot = AppPaths.RAW_DIR
+                    .toAbsolutePath()
+                    .normalize();
+
             Path rawFolder = rawFile.getParent();
 
             if (rawFolder == null || !rawFolder.startsWith(rawRoot)) {
@@ -421,7 +453,11 @@ public class EditedVideoSortService {
 
             if (start >= 0) {
                 start = start + marker.length();
-                return extractVideoIdAfterMarker(nameWithoutExtension, start);
+
+                return extractVideoIdAfterMarker(
+                        nameWithoutExtension,
+                        start
+                );
             }
         }
 
@@ -451,7 +487,11 @@ public class EditedVideoSortService {
         return text.substring(start, end).trim();
     }
 
-    private int findFirstDelimiter(String text, int start, String... delimiters) {
+    private int findFirstDelimiter(
+            String text,
+            int start,
+            String... delimiters
+    ) {
         int bestIndex = -1;
 
         for (String delimiter : delimiters) {
@@ -518,7 +558,10 @@ public class EditedVideoSortService {
                     + randomDigits(DUPLICATE_RANDOM_DIGIT_COUNT);
 
             Path candidate = parent.resolve(
-                    baseName + "_" + numericSuffix + extension
+                    baseName
+                            + "_"
+                            + numericSuffix
+                            + extension
             );
 
             if (!Files.exists(candidate)) {
