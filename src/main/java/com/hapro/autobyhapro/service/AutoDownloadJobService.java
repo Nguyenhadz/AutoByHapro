@@ -18,8 +18,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -27,6 +29,7 @@ import java.util.concurrent.Future;
 public class AutoDownloadJobService {
 
     private static final int VIDEO_PER_FOLDER_BATCH = 6;
+    private static final int FOLLOW_UP_SCAN_STEP = 10;
 
     private final SourceScannerService sourceScannerService = new SourceScannerService();
     private final DownloadPlanRepository downloadPlanRepository = new DownloadPlanRepository();
@@ -112,78 +115,154 @@ public class AutoDownloadJobService {
             int requestedCount,
             int threadCount
     ) {
+        int safeRequestedCount = Math.max(1, requestedCount);
+
         System.out.println();
         System.out.println("====================================");
         System.out.println("Đang xử lý page:");
         System.out.println(target.getFanpageCode() + " - " + target.getFanpageName());
         System.out.println("Source: " + target.getSourceCode() + " - " + target.getSourceName());
-        System.out.println("Yêu cầu: " + requestedCount + " video");
+        System.out.println("Yêu cầu: " + safeRequestedCount + " video");
         System.out.println("====================================");
 
         Long downloadBatchId = null;
         List<VideoBatchFolder> folders = List.of();
-        List<VideoCandidate> videosToDownload = List.of();
-        List<VideoDownloadItemResult> downloadResults = List.of();
+        List<VideoCandidate> videosToDownload = new ArrayList<>();
+        List<VideoDownloadItemResult> downloadResults = new ArrayList<>();
+        SourceScanResult latestScanResult = null;
 
         try {
             Source source = toSource(target);
 
-            int scanRequestCount = buildInitialScanRequestCount(
-                    target,
-                    requestedCount
-            );
+            int currentScanLimit = buildInitialScanRequestCount(safeRequestedCount);
+            int maxScanLimit = buildMaxScanRequestCount(target, safeRequestedCount);
+            int lastScannedCount = -1;
+            boolean firstScan = true;
 
-            int maxScanRequestCount = buildMaxScanRequestCount(
-                    target,
-                    requestedCount
-            );
+            Set<String> attemptedVideoIds = new LinkedHashSet<>();
 
-            SourceScanResult scanResult = null;
+            while (countSuccess(downloadResults) < safeRequestedCount
+                    && currentScanLimit <= maxScanLimit) {
 
-            while (true) {
-                scanResult = sourceScannerService.findNewVideos(
+                int beforeSuccessCount = countSuccess(downloadResults);
+
+                if (firstScan) {
+                    System.out.println(
+                            "Quét lần đầu: "
+                                    + safeRequestedCount
+                                    + " x 2 = "
+                                    + currentScanLimit
+                                    + " video."
+                    );
+                } else {
+                    System.out.println(
+                            "Chưa tải đủ "
+                                    + safeRequestedCount
+                                    + " video. Quét tiếp thêm "
+                                    + FOLLOW_UP_SCAN_STEP
+                                    + " video, tổng số video quét tối đa: "
+                                    + currentScanLimit
+                                    + "."
+                    );
+                }
+
+                latestScanResult = sourceScannerService.findNewVideos(
                         source,
-                        scanRequestCount
+                        currentScanLimit
                 );
 
-                videosToDownload = selectDownloadableVideos(
+                if (latestScanResult.getNewVideos() == null
+                        || latestScanResult.getNewVideos().isEmpty()) {
+                    break;
+                }
+
+                List<VideoCandidate> unattemptedCandidates = filterUnattemptedVideos(
+                        latestScanResult.getNewVideos(),
+                        attemptedVideoIds
+                );
+
+                if (unattemptedCandidates.isEmpty()) {
+                    if (latestScanResult.getScannedCount() == lastScannedCount) {
+                        break;
+                    }
+
+                    lastScannedCount = latestScanResult.getScannedCount();
+                    currentScanLimit = nextScanLimit(currentScanLimit, maxScanLimit);
+                    firstScan = false;
+                    continue;
+                }
+
+                int roundCandidateLimit = firstScan
+                        ? currentScanLimit
+                        : FOLLOW_UP_SCAN_STEP;
+
+                List<VideoCandidate> roundCandidates = selectDownloadableVideos(
                         target,
-                        scanResult.getNewVideos(),
-                        scanRequestCount
+                        unattemptedCandidates,
+                        roundCandidateLimit
                 );
 
-                if (videosToDownload.size() >= requestedCount) {
+                if (roundCandidates.isEmpty()) {
+                    if (latestScanResult.getScannedCount() == lastScannedCount) {
+                        break;
+                    }
+
+                    lastScannedCount = latestScanResult.getScannedCount();
+                    currentScanLimit = nextScanLimit(currentScanLimit, maxScanLimit);
+                    firstScan = false;
+                    continue;
+                }
+
+                for (VideoCandidate candidate : roundCandidates) {
+                    attemptedVideoIds.add(candidate.getVideoId());
+                }
+
+                if (downloadBatchId == null) {
+                    downloadBatchId = downloadPlanRepository.createDownloadBatch(
+                            target.getFanpageId(),
+                            target.getSourceId(),
+                            safeRequestedCount,
+                            threadCount
+                    );
+
+                    folders = createVideoBatchFolders(
+                            target,
+                            downloadBatchId,
+                            safeRequestedCount
+                    );
+                }
+
+                videosToDownload.addAll(roundCandidates);
+
+                List<VideoDownloadItemResult> roundDownloadResults =
+                        videoDownloadService.downloadVideos(
+                                target,
+                                roundCandidates,
+                                folders,
+                                safeRequestedCount,
+                                beforeSuccessCount
+                        );
+
+                downloadResults.addAll(roundDownloadResults);
+
+                if (countSuccess(downloadResults) >= safeRequestedCount) {
                     break;
                 }
 
-                if (scanRequestCount >= maxScanRequestCount) {
+                if (latestScanResult.getScannedCount() == lastScannedCount
+                        || latestScanResult.getScannedCount() < currentScanLimit) {
                     break;
                 }
 
-                int nextScanRequestCount = Math.min(
-                        scanRequestCount * 2,
-                        maxScanRequestCount
-                );
-
-                if (nextScanRequestCount == scanRequestCount) {
-                    break;
-                }
-
-                System.out.println(
-                        "Chưa đủ video ứng viên. Tăng số bài quét từ "
-                                + scanRequestCount
-                                + " lên "
-                                + nextScanRequestCount
-                                + "..."
-                );
-
-                scanRequestCount = nextScanRequestCount;
+                lastScannedCount = latestScanResult.getScannedCount();
+                currentScanLimit = nextScanLimit(currentScanLimit, maxScanLimit);
+                firstScan = false;
             }
 
-            if (scanResult == null) {
+            if (latestScanResult == null) {
                 return new AutoDownloadPageResult(
                         target,
-                        requestedCount,
+                        safeRequestedCount,
                         0,
                         0,
                         0,
@@ -201,9 +280,9 @@ public class AutoDownloadJobService {
             if (videosToDownload.isEmpty()) {
                 return new AutoDownloadPageResult(
                         target,
-                        requestedCount,
-                        scanResult.getScannedCount(),
-                        scanResult.getSkippedExistingCount(),
+                        safeRequestedCount,
+                        latestScanResult.getScannedCount(),
+                        latestScanResult.getSkippedExistingCount(),
                         0,
                         0,
                         0,
@@ -216,32 +295,12 @@ public class AutoDownloadJobService {
                 );
             }
 
-            downloadBatchId = downloadPlanRepository.createDownloadBatch(
-                    target.getFanpageId(),
-                    target.getSourceId(),
-                    requestedCount,
-                    threadCount
-            );
-
-            folders = createVideoBatchFolders(
-                    target,
-                    downloadBatchId,
-                    requestedCount
-            );
-
-            downloadResults = videoDownloadService.downloadVideos(
-                    target,
-                    videosToDownload,
-                    folders,
-                    requestedCount
-            );
-
             int downloadedCount = countSuccess(downloadResults);
             int failedCount = downloadResults.size() - downloadedCount;
 
             updateBatchStatuses(
                     downloadBatchId,
-                    requestedCount,
+                    safeRequestedCount,
                     folders,
                     downloadResults
             );
@@ -250,14 +309,14 @@ public class AutoDownloadJobService {
 
             if (downloadedCount == 0) {
                 status = "DOWNLOAD_FAILED";
-            } else if (downloadedCount < requestedCount) {
+            } else if (downloadedCount < safeRequestedCount) {
                 status = "DOWNLOADED_PARTIAL";
             } else {
                 status = "DOWNLOADED_FULL";
             }
 
             String message = "Yêu cầu "
-                    + requestedCount
+                    + safeRequestedCount
                     + " video, chuẩn bị "
                     + videosToDownload.size()
                     + " video ứng viên, tải thành công "
@@ -266,9 +325,9 @@ public class AutoDownloadJobService {
 
             return new AutoDownloadPageResult(
                     target,
-                    requestedCount,
-                    scanResult.getScannedCount(),
-                    scanResult.getSkippedExistingCount(),
+                    safeRequestedCount,
+                    latestScanResult.getScannedCount(),
+                    latestScanResult.getSkippedExistingCount(),
                     videosToDownload.size(),
                     downloadedCount,
                     failedCount,
@@ -291,12 +350,12 @@ public class AutoDownloadJobService {
 
             return new AutoDownloadPageResult(
                     target,
-                    requestedCount,
-                    0,
-                    0,
+                    safeRequestedCount,
+                    latestScanResult == null ? 0 : latestScanResult.getScannedCount(),
+                    latestScanResult == null ? 0 : latestScanResult.getSkippedExistingCount(),
                     videosToDownload.size(),
                     countSuccess(downloadResults),
-                    Math.max(0, videosToDownload.size() - countSuccess(downloadResults)),
+                    Math.max(0, downloadResults.size() - countSuccess(downloadResults)),
                     downloadBatchId,
                     videosToDownload,
                     folders,
@@ -305,6 +364,48 @@ public class AutoDownloadJobService {
                     exception.getMessage()
             );
         }
+    }
+
+    private List<VideoCandidate> filterUnattemptedVideos(
+            List<VideoCandidate> candidates,
+            Set<String> attemptedVideoIds
+    ) {
+        List<VideoCandidate> result = new ArrayList<>();
+
+        if (candidates == null || candidates.isEmpty()) {
+            return result;
+        }
+
+        for (VideoCandidate candidate : candidates) {
+            if (candidate == null
+                    || candidate.getVideoId() == null
+                    || candidate.getVideoId().isBlank()) {
+                continue;
+            }
+
+            if (attemptedVideoIds.contains(candidate.getVideoId())) {
+                continue;
+            }
+
+            result.add(candidate);
+        }
+
+        return result;
+    }
+
+    private int buildInitialScanRequestCount(int requestedCount) {
+        return Math.max(1, requestedCount * 2);
+    }
+
+    private int nextScanLimit(int currentScanLimit, int maxScanLimit) {
+        if (currentScanLimit >= maxScanLimit) {
+            return maxScanLimit + 1;
+        }
+
+        return Math.min(
+                currentScanLimit + FOLLOW_UP_SCAN_STEP,
+                maxScanLimit
+        );
     }
 
     private String buildCandidateUrl(DownloadTarget target, VideoCandidate video) {
@@ -331,12 +432,6 @@ public class AutoDownloadJobService {
         String originalSourceUrl = target == null ? "" : safeTrim(target.getSourceUrl());
         String username = extractTikTokUsername(originalSourceUrl);
 
-        /*
-         * Khi source đã resolve thành tiktokuser:channel_id, yt-dlp có thể trả
-         * webpage_url dạng https://www.tiktok.com/@MS4w.../video/xxx.
-         * MS4w... là channel_id/secUid, không phải username nên không dùng để
-         * kiểm tra từng video. Ta luôn dựng URL từ username gốc người dùng nhập.
-         */
         if (!username.isBlank() && !videoId.isBlank()) {
             return "https://www.tiktok.com/@" + username + "/video/" + videoId;
         }
@@ -452,35 +547,14 @@ public class AutoDownloadJobService {
         return text.trim();
     }
 
-    private int buildInitialScanRequestCount(DownloadTarget target, int requestedCount) {
-        int safeRequestedCount = Math.max(1, requestedCount);
-
-        if (isTikTokTarget(target)) {
-            return Math.min(
-                    Math.max(safeRequestedCount * 5, 30),
-                    100
-            );
-        }
-
-        /*
-         * YouTube cũng lấy dư ứng viên.
-         * Nếu vài video đầu là members-only/private/unavailable,
-         * VideoDownloadService sẽ ghi chúng vào DB rồi thử video tiếp theo trong cùng lượt tải.
-         */
-        return Math.min(
-                Math.max(safeRequestedCount * 3, safeRequestedCount + 12),
-                80
-        );
-    }
-
     private int buildMaxScanRequestCount(DownloadTarget target, int requestedCount) {
         int safeRequestedCount = Math.max(1, requestedCount);
 
         if (isTikTokTarget(target)) {
-            return Math.max(1000, safeRequestedCount * 20);
+            return Math.max(500, safeRequestedCount * 30);
         }
 
-        return Math.max(100, safeRequestedCount * 10);
+        return Math.max(200, safeRequestedCount * 20);
     }
 
     private List<VideoCandidate> selectDownloadableVideos(
@@ -591,17 +665,6 @@ public class AutoDownloadJobService {
                 80
         );
 
-        /*
-         * Từ bản này trở đi, file RAW và EDITED không còn chia vào folder batch.
-         * Mỗi fanpage chỉ có 1 folder raw và 1 folder edited:
-         *
-         * video/raw/P001_Ten_Page/
-         * video/edited/P001_Ten_Page/
-         *
-         * Bảng video_batches vẫn được giữ để tool còn quản lý trạng thái upload,
-         * nhưng raw_folder_path và edited_folder_path của mọi batch trong page
-         * đều trỏ về folder page chung.
-         */
         Path pageRawFolder = AppPaths.RAW_DIR.resolve(pageFolderName);
         Path pageEditedFolder = AppPaths.EDITED_DIR.resolve(pageFolderName);
 
@@ -659,6 +722,10 @@ public class AutoDownloadJobService {
             List<VideoBatchFolder> folders,
             List<VideoDownloadItemResult> downloadResults
     ) {
+        if (downloadBatchId == null) {
+            return;
+        }
+
         int downloadedCount = countSuccess(downloadResults);
 
         String downloadBatchStatus;

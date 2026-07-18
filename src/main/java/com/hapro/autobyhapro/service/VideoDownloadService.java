@@ -35,7 +35,8 @@ public class VideoDownloadService {
                 target,
                 videos,
                 folders,
-                requestedSuccessCount
+                requestedSuccessCount,
+                0
         );
     }
 
@@ -44,6 +45,22 @@ public class VideoDownloadService {
             List<VideoCandidate> videos,
             List<VideoBatchFolder> folders,
             int requestedSuccessCount
+    ) {
+        return downloadVideos(
+                target,
+                videos,
+                folders,
+                requestedSuccessCount,
+                0
+        );
+    }
+
+    public List<VideoDownloadItemResult> downloadVideos(
+            DownloadTarget target,
+            List<VideoCandidate> videos,
+            List<VideoBatchFolder> folders,
+            int requestedSuccessCount,
+            int alreadySuccessCount
     ) {
         List<VideoDownloadItemResult> results = new ArrayList<>();
 
@@ -66,7 +83,7 @@ public class VideoDownloadService {
             targetSuccessCount = Math.min(targetSuccessCount, folderCapacity);
         }
 
-        int successCount = 0;
+        int successCount = Math.max(0, alreadySuccessCount);
         int attemptCount = 0;
 
         for (VideoCandidate video : videos) {
@@ -474,11 +491,6 @@ public class VideoDownloadService {
         String originalSourceUrl = target == null ? "" : safeTrim(target.getSourceUrl());
         String username = extractTikTokUsername(originalSourceUrl);
 
-        /*
-         * resolved_source_url = tiktokuser:channel_id chỉ dùng để quét playlist.
-         * Khi tải từng video, TikTok cần username thật ở dạng @username/video/id.
-         * Không dùng @MS4w... vì MS4w... là secUid/channel_id, không phải username.
-         */
         if (!username.isBlank() && !videoId.isBlank()) {
             return "https://www.tiktok.com/@" + username + "/video/" + videoId;
         }

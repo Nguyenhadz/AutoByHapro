@@ -12,22 +12,19 @@ import java.util.Set;
 
 public class SourceScannerService {
 
-    private static final int START_SCAN_LIMIT = 12;
-    private static final int MAX_SCAN_LIMIT = 500;
     private static final int YT_DLP_TIMEOUT_SECONDS = 60;
 
     private final YtDlpService ytDlpService = new YtDlpService();
     private final VideoRepository videoRepository = new VideoRepository();
-    private final TikTokChannelResolverService tiktokChannelResolverService = new TikTokChannelResolverService();
+    private final TikTokChannelResolverService tiktokChannelResolverService =
+            new TikTokChannelResolverService();
 
-    public SourceScanResult findNewVideos(Source source, int requestedCount) {
+    public SourceScanResult findNewVideos(Source source, int scanLimit) {
         if (source == null) {
             throw new RuntimeException("Source đang bị trống.");
         }
 
-        if (requestedCount <= 0) {
-            requestedCount = 6;
-        }
+        int safeScanLimit = Math.max(1, scanLimit);
 
         String sourceUrlForScan = tiktokChannelResolverService.resolveSourceUrlForUse(source);
 
@@ -35,65 +32,45 @@ public class SourceScannerService {
             sourceUrlForScan = source.getSourceUrl();
         }
 
-        int scanLimit = START_SCAN_LIMIT;
-        int lastScannedCount = -1;
+        System.out.println("Đang đọc tối đa " + safeScanLimit + " video từ source...");
+        System.out.println("URL dùng để quét: " + sourceUrlForScan);
 
-        List<VideoCandidate> latestScannedVideos = new ArrayList<>();
-        List<VideoCandidate> newVideos = new ArrayList<>();
-        int skippedExistingCount = 0;
+        List<VideoCandidate> scannedVideos = ytDlpService.listVideos(
+                sourceUrlForScan,
+                safeScanLimit,
+                YT_DLP_TIMEOUT_SECONDS
+        );
 
-        while (scanLimit <= MAX_SCAN_LIMIT) {
-            System.out.println("Đang đọc tối đa " + scanLimit + " video từ source...");
-            System.out.println("URL dùng để quét: " + sourceUrlForScan);
-
-            latestScannedVideos = ytDlpService.listVideos(
-                    sourceUrlForScan,
-                    scanLimit,
-                    YT_DLP_TIMEOUT_SECONDS
-            );
-
-            if (latestScannedVideos.isEmpty()) {
-                break;
-            }
-
-            ScanFilterResult filterResult = filterNewVideos(
-                    source.getId(),
-                    latestScannedVideos,
-                    requestedCount
-            );
-
-            newVideos = filterResult.newVideos();
-            skippedExistingCount = filterResult.skippedExistingCount();
-
-            if (newVideos.size() >= requestedCount) {
-                break;
-            }
-
-            if (latestScannedVideos.size() == lastScannedCount) {
-                break;
-            }
-
-            lastScannedCount = latestScannedVideos.size();
-            scanLimit = scanLimit * 2;
-        }
+        ScanFilterResult filterResult = filterNewVideos(
+                source.getId(),
+                scannedVideos,
+                safeScanLimit
+        );
 
         return new SourceScanResult(
                 source,
-                requestedCount,
-                latestScannedVideos.size(),
-                skippedExistingCount,
-                newVideos
+                safeScanLimit,
+                scannedVideos.size(),
+                filterResult.skippedExistingCount(),
+                filterResult.newVideos()
         );
     }
 
-    private ScanFilterResult filterNewVideos(Long sourceId, List<VideoCandidate> scannedVideos, int requestedCount) {
+    private ScanFilterResult filterNewVideos(
+            Long sourceId,
+            List<VideoCandidate> scannedVideos,
+            int maxNewVideoCount
+    ) {
         Set<String> scannedIds = new LinkedHashSet<>();
 
         for (VideoCandidate video : scannedVideos) {
             scannedIds.add(video.getVideoId());
         }
 
-        Set<String> existingIds = videoRepository.findExistingVideoIds(sourceId, scannedIds);
+        Set<String> existingIds = videoRepository.findExistingVideoIds(
+                sourceId,
+                scannedIds
+        );
 
         List<VideoCandidate> newVideos = new ArrayList<>();
         int skippedExistingCount = 0;
@@ -104,14 +81,20 @@ public class SourceScannerService {
                 continue;
             }
 
-            if (newVideos.size() < requestedCount) {
+            if (newVideos.size() < maxNewVideoCount) {
                 newVideos.add(video);
             }
         }
 
-        return new ScanFilterResult(newVideos, skippedExistingCount);
+        return new ScanFilterResult(
+                newVideos,
+                skippedExistingCount
+        );
     }
 
-    private record ScanFilterResult(List<VideoCandidate> newVideos, int skippedExistingCount) {
+    private record ScanFilterResult(
+            List<VideoCandidate> newVideos,
+            int skippedExistingCount
+    ) {
     }
 }
