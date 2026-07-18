@@ -451,6 +451,10 @@ public class VideoDownloadService {
     }
 
     private String buildDownloadUrl(DownloadTarget target, VideoCandidate video) {
+        if (isTikTokTarget(target)) {
+            return buildTikTokVideoUrlFromOriginalSource(target, video);
+        }
+
         if (video.getUrl() != null && !video.getUrl().isBlank()) {
             return video.getUrl();
         }
@@ -460,6 +464,134 @@ public class VideoDownloadService {
         }
 
         return video.getVideoId();
+    }
+
+    private String buildTikTokVideoUrlFromOriginalSource(
+            DownloadTarget target,
+            VideoCandidate video
+    ) {
+        String videoId = video == null ? "" : safeTrim(video.getVideoId());
+        String originalSourceUrl = target == null ? "" : safeTrim(target.getSourceUrl());
+        String username = extractTikTokUsername(originalSourceUrl);
+
+        /*
+         * resolved_source_url = tiktokuser:channel_id chỉ dùng để quét playlist.
+         * Khi tải từng video, TikTok cần username thật ở dạng @username/video/id.
+         * Không dùng @MS4w... vì MS4w... là secUid/channel_id, không phải username.
+         */
+        if (!username.isBlank() && !videoId.isBlank()) {
+            return "https://www.tiktok.com/@" + username + "/video/" + videoId;
+        }
+
+        String candidateUrl = video == null ? "" : safeTrim(video.getUrl());
+
+        if (!candidateUrl.isBlank()
+                && !isTikTokVideoUrlUsingResolvedChannelId(candidateUrl)) {
+            return candidateUrl;
+        }
+
+        if (!videoId.isBlank()) {
+            return videoId;
+        }
+
+        return candidateUrl;
+    }
+
+    private boolean isTikTokTarget(DownloadTarget target) {
+        if (target == null) {
+            return false;
+        }
+
+        String sourceType = target.getSourceType();
+        String sourceUrl = target.getSourceUrl();
+
+        if (sourceType != null && sourceType.equalsIgnoreCase("TIKTOK")) {
+            return true;
+        }
+
+        if (sourceUrl == null) {
+            return false;
+        }
+
+        String lowerUrl = sourceUrl.toLowerCase();
+
+        return lowerUrl.contains("tiktok.com")
+                || lowerUrl.contains("vm.tiktok.com")
+                || lowerUrl.contains("vt.tiktok.com")
+                || lowerUrl.startsWith("tiktokuser:");
+    }
+
+    private boolean isTikTokVideoUrlUsingResolvedChannelId(String url) {
+        String username = extractTikTokUsername(url);
+
+        return looksLikeTikTokChannelId(username);
+    }
+
+    private boolean looksLikeTikTokChannelId(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+
+        String cleanValue = value.trim();
+
+        return cleanValue.toLowerCase().startsWith("ms4wlj")
+                || cleanValue.length() > 30
+                || cleanValue.contains("-");
+    }
+
+    private String extractTikTokUsername(String urlOrUsername) {
+        if (urlOrUsername == null || urlOrUsername.isBlank()) {
+            return "";
+        }
+
+        String cleanText = urlOrUsername.trim();
+
+        if (cleanText.toLowerCase().startsWith("tiktokuser:")) {
+            return "";
+        }
+
+        int atIndex = cleanText.indexOf("@");
+
+        if (atIndex >= 0) {
+            String usernamePart = cleanText.substring(atIndex + 1);
+            return cleanTikTokUsernamePart(usernamePart);
+        }
+
+        if (!cleanText.contains("/")
+                && !cleanText.contains(":")
+                && !cleanText.contains("?")) {
+            return cleanTikTokUsernamePart(cleanText);
+        }
+
+        return "";
+    }
+
+    private String cleanTikTokUsernamePart(String usernamePart) {
+        if (usernamePart == null || usernamePart.isBlank()) {
+            return "";
+        }
+
+        String username = usernamePart.trim();
+
+        int slashIndex = username.indexOf("/");
+        if (slashIndex >= 0) {
+            username = username.substring(0, slashIndex);
+        }
+
+        int questionIndex = username.indexOf("?");
+        if (questionIndex >= 0) {
+            username = username.substring(0, questionIndex);
+        }
+
+        return username.trim();
+    }
+
+    private String safeTrim(String text) {
+        if (text == null) {
+            return "";
+        }
+
+        return text.trim();
     }
 
     private String buildBaseFileName(

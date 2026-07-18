@@ -308,6 +308,10 @@ public class AutoDownloadJobService {
     }
 
     private String buildCandidateUrl(DownloadTarget target, VideoCandidate video) {
+        if (isTikTokTarget(target)) {
+            return buildTikTokVideoUrlFromOriginalSource(target, video);
+        }
+
         if (video.getUrl() != null && !video.getUrl().isBlank()) {
             return video.getUrl();
         }
@@ -317,6 +321,38 @@ public class AutoDownloadJobService {
         }
 
         return video.getVideoId();
+    }
+
+    private String buildTikTokVideoUrlFromOriginalSource(
+            DownloadTarget target,
+            VideoCandidate video
+    ) {
+        String videoId = video == null ? "" : safeTrim(video.getVideoId());
+        String originalSourceUrl = target == null ? "" : safeTrim(target.getSourceUrl());
+        String username = extractTikTokUsername(originalSourceUrl);
+
+        /*
+         * Khi source đã resolve thành tiktokuser:channel_id, yt-dlp có thể trả
+         * webpage_url dạng https://www.tiktok.com/@MS4w.../video/xxx.
+         * MS4w... là channel_id/secUid, không phải username nên không dùng để
+         * kiểm tra từng video. Ta luôn dựng URL từ username gốc người dùng nhập.
+         */
+        if (!username.isBlank() && !videoId.isBlank()) {
+            return "https://www.tiktok.com/@" + username + "/video/" + videoId;
+        }
+
+        String candidateUrl = video == null ? "" : safeTrim(video.getUrl());
+
+        if (!candidateUrl.isBlank()
+                && !isTikTokVideoUrlUsingResolvedChannelId(candidateUrl)) {
+            return candidateUrl;
+        }
+
+        if (!videoId.isBlank()) {
+            return videoId;
+        }
+
+        return candidateUrl;
     }
 
     private boolean isTikTokTarget(DownloadTarget target) {
@@ -339,7 +375,81 @@ public class AutoDownloadJobService {
 
         return lowerUrl.contains("tiktok.com")
                 || lowerUrl.contains("vm.tiktok.com")
-                || lowerUrl.contains("vt.tiktok.com");
+                || lowerUrl.contains("vt.tiktok.com")
+                || lowerUrl.startsWith("tiktokuser:");
+    }
+
+    private boolean isTikTokVideoUrlUsingResolvedChannelId(String url) {
+        String username = extractTikTokUsername(url);
+
+        return looksLikeTikTokChannelId(username);
+    }
+
+    private boolean looksLikeTikTokChannelId(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+
+        String cleanValue = value.trim();
+
+        return cleanValue.toLowerCase().startsWith("ms4wlj")
+                || cleanValue.length() > 30
+                || cleanValue.contains("-");
+    }
+
+    private String extractTikTokUsername(String urlOrUsername) {
+        if (urlOrUsername == null || urlOrUsername.isBlank()) {
+            return "";
+        }
+
+        String cleanText = urlOrUsername.trim();
+
+        if (cleanText.toLowerCase().startsWith("tiktokuser:")) {
+            return "";
+        }
+
+        int atIndex = cleanText.indexOf("@");
+
+        if (atIndex >= 0) {
+            String usernamePart = cleanText.substring(atIndex + 1);
+            return cleanTikTokUsernamePart(usernamePart);
+        }
+
+        if (!cleanText.contains("/")
+                && !cleanText.contains(":")
+                && !cleanText.contains("?")) {
+            return cleanTikTokUsernamePart(cleanText);
+        }
+
+        return "";
+    }
+
+    private String cleanTikTokUsernamePart(String usernamePart) {
+        if (usernamePart == null || usernamePart.isBlank()) {
+            return "";
+        }
+
+        String username = usernamePart.trim();
+
+        int slashIndex = username.indexOf("/");
+        if (slashIndex >= 0) {
+            username = username.substring(0, slashIndex);
+        }
+
+        int questionIndex = username.indexOf("?");
+        if (questionIndex >= 0) {
+            username = username.substring(0, questionIndex);
+        }
+
+        return username.trim();
+    }
+
+    private String safeTrim(String text) {
+        if (text == null) {
+            return "";
+        }
+
+        return text.trim();
     }
 
     private int buildInitialScanRequestCount(DownloadTarget target, int requestedCount) {
