@@ -14,11 +14,14 @@ import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 public class EditedVideoSortService {
+
+    private static final Locale VIETNAMESE_LOCALE = Locale.forLanguageTag("vi-VN");
 
     private static final Pattern BATCH_CODE_DOUBLE_PATTERN =
             Pattern.compile("P\\d{3}__D\\d{6}__B\\d{3}");
@@ -266,8 +269,10 @@ public class EditedVideoSortService {
             return "";
         }
 
+        String normalizedTitle = toSentenceCase(cleanTitle);
+
         String safeTitle = FileNameUtil.safeFileName(
-                cleanTitle,
+                normalizedTitle,
                 MAX_EDITED_TITLE_LENGTH
         );
 
@@ -290,6 +295,41 @@ public class EditedVideoSortService {
         }
 
         return safeTitle;
+    }
+
+    private String toSentenceCase(String title) {
+        if (title == null || title.isBlank()) {
+            return "";
+        }
+
+        String lowerTitle = title.toLowerCase(VIETNAMESE_LOCALE);
+        int firstLetterIndex = -1;
+
+        for (int index = 0; index < lowerTitle.length(); ) {
+            int codePoint = lowerTitle.codePointAt(index);
+
+            if (Character.isLetter(codePoint)) {
+                firstLetterIndex = index;
+                break;
+            }
+
+            index = index + Character.charCount(codePoint);
+        }
+
+        if (firstLetterIndex < 0) {
+            return lowerTitle;
+        }
+
+        int firstCodePoint = lowerTitle.codePointAt(firstLetterIndex);
+        String upperFirstLetter = new String(Character.toChars(firstCodePoint))
+                .toUpperCase(VIETNAMESE_LOCALE);
+
+        int afterFirstLetterIndex = firstLetterIndex
+                + Character.charCount(firstCodePoint);
+
+        return lowerTitle.substring(0, firstLetterIndex)
+                + upperFirstLetter
+                + lowerTitle.substring(afterFirstLetterIndex);
     }
 
     private boolean isWindowsReservedFileName(String fileName) {
