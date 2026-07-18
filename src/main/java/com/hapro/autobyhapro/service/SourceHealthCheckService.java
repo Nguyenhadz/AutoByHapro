@@ -5,7 +5,6 @@ import com.hapro.autobyhapro.database.DatabaseManager;
 import com.hapro.autobyhapro.entity.SourceCheckResult;
 
 import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -21,13 +20,10 @@ import java.util.Set;
 
 public class SourceHealthCheckService {
 
-    /*
-     * Kiểm tra source không cần đếm chính xác vô hạn.
-     * Chỉ cần biết còn ít hay còn rất nhiều video chưa tải.
-     * Khi đã thấy đủ 500 video chưa tải, tool sẽ dừng yt-dlp để tránh quét quá lâu.
-     */
     private static final int NOT_YET_DOWNLOADED_LIMIT = 500;
     private static final int CHECK_TIMEOUT_SECONDS = 300;
+
+    private final TikTokChannelResolverService tiktokChannelResolverService = new TikTokChannelResolverService();
 
     public List<SourceCheckResult> findActiveSourcesForCheck() {
         try (Connection connection = DatabaseManager.getConnection()) {
@@ -39,7 +35,6 @@ public class SourceHealthCheckService {
             boolean deletedSourcesTableExists = tableExists(connection, "deleted_sources");
 
             StringBuilder sqlBuilder = new StringBuilder();
-
             sqlBuilder.append("""
                     SELECT
                         s.id AS source_id,
@@ -131,25 +126,23 @@ public class SourceHealthCheckService {
         }
 
         if (source.getSourceUrl() == null || source.getSourceUrl().isBlank()) {
-            return source.withCheckResult(
-                    "Lỗi",
-                    0,
-                    0,
-                    0,
-                    "Source chưa có link."
-            );
+            return source.withCheckResult("Lỗi", 0, 0, 0, "Source chưa có link.");
         }
 
         Path ytDlpFile = AppPaths.ytDlpFile();
 
         if (!Files.exists(ytDlpFile)) {
-            return source.withCheckResult(
-                    "Lỗi",
-                    0,
-                    0,
-                    0,
-                    "Chưa có yt-dlp.exe tại:\n" + ytDlpFile.toAbsolutePath()
-            );
+            return source.withCheckResult("Lỗi", 0, 0, 0, "Chưa có yt-dlp.exe tại:\n" + ytDlpFile.toAbsolutePath());
+        }
+
+        String sourceUrlForCheck = tiktokChannelResolverService.resolveSourceUrlForUse(
+                source.getSourceId(),
+                source.getSourceType(),
+                source.getSourceUrl()
+        );
+
+        if (sourceUrlForCheck == null || sourceUrlForCheck.isBlank()) {
+            sourceUrlForCheck = source.getSourceUrl();
         }
 
         Set<String> downloadedIds = findDownloadedVideoIds(source.getSourceId());
@@ -161,108 +154,112 @@ public class SourceHealthCheckService {
         command.add("%(id)s");
         command.add("--no-warnings");
         command.add("--ignore-errors");
-        command.add(source.getSourceUrl());
+        command.add(sourceUrlForCheck);
 
-        SourceScanResult scanResult = runScanCommand(
-                command,
-                ytDlpFile.getParent(),
-                CHECK_TIMEOUT_SECONDS,
-                downloadedIds
-        );
+        SourceScanResult scanResult = runScanCommand(command, ytDlpFile.getParent(), CHECK_TIMEOUT_SECONDS, downloadedIds);
 
         int totalFound = scanResult.totalFoundCount();
         int alreadyDownloaded = scanResult.alreadyDownloadedCount();
         int notYetDownloaded = scanResult.notYetDownloadedCount();
 
-        String status;
-        String message;
+        String messagePrefix = "";
+
+        if (!sourceUrlForCheck.equals(source.getSourceUrl())) {
+            messagePrefix = "Đang dùng TikTok channel_id đã resolve:\n" + sourceUrlForCheck + "\n\n";
+        }
 
         if (scanResult.limitReached()) {
-            status = "OK";
-            message = "Source kiểm tra OK.\n"
-                    + "Tool đã dừng quét sớm vì đã tìm được từ "
-                    + NOT_YET_DOWNLOADED_LIMIT
-                    + " video chưa tải trở lên.\n"
-                    + "Không cần quét hết kênh để tránh chạy quá lâu.\n\n"
-                    + "Tổng video đã quét: "
-                    + totalFound
-                    + "\n"
-                    + "Đã có trong DB: "
-                    + alreadyDownloaded
-                    + "\n"
-                    + "Chưa tải: từ "
-                    + NOT_YET_DOWNLOADED_LIMIT
-                    + " video trở lên.";
-
             return source.withCheckResult(
-                    status,
+                    "OK",
                     totalFound,
                     alreadyDownloaded,
                     NOT_YET_DOWNLOADED_LIMIT,
-                    message
+                    messagePrefix
+                            + "Source kiểm tra OK.\n"
+                            + "Tool đã dừng quét sớm vì đã tìm được từ "
+                            + NOT_YET_DOWNLOADED_LIMIT
+                            + " video chưa tải trở lên.\n"
+                            + "Không cần quét hết kênh để tránh chạy quá lâu.\n\n"
+                            + "Tổng video đã quét: "
+                            + totalFound
+                            + "\nĐã có trong DB: "
+                            + alreadyDownloaded
+                            + "\nChưa tải: từ "
+                            + NOT_YET_DOWNLOADED_LIMIT
+                            + " video trở lên."
             );
         }
 
         if (scanResult.timeout()) {
-            status = "Quá lâu";
-            message = "Lệnh kiểm tra chạy quá "
-                    + CHECK_TIMEOUT_SECONDS
-                    + " giây nên đã bị dừng.\n"
-                    + "Kết quả bên dưới chỉ là phần đã quét được trước khi dừng.\n\n"
-                    + "Tổng video đã quét: "
-                    + totalFound
-                    + "\n"
-                    + "Đã có trong DB: "
-                    + alreadyDownloaded
-                    + "\n"
-                    + "Chưa tải: "
-                    + notYetDownloaded
-                    + "\n\n"
-                    + shortOutput(scanResult.output());
+            return source.withCheckResult(
+                    "Quá lâu",
+                    totalFound,
+                    alreadyDownloaded,
+                    notYetDownloaded,
+                    messagePrefix
+                            + "Lệnh kiểm tra chạy quá "
+                            + CHECK_TIMEOUT_SECONDS
+                            + " giây nên đã bị dừng.\n"
+                            + "Kết quả bên dưới chỉ là phần đã quét được trước khi dừng.\n\n"
+                            + "Tổng video đã quét: "
+                            + totalFound
+                            + "\nĐã có trong DB: "
+                            + alreadyDownloaded
+                            + "\nChưa tải: "
+                            + notYetDownloaded
+                            + "\n\n"
+                            + shortOutput(scanResult.output())
+            );
+        }
 
-        } else if (totalFound > 0 && scanResult.exitCode() == 0) {
-            status = "OK";
-            message = "Source kiểm tra OK.\n"
-                    + "Tổng video quét được: "
-                    + totalFound
-                    + "\n"
-                    + "Đã có trong DB: "
-                    + alreadyDownloaded
-                    + "\n"
-                    + "Chưa tải: "
-                    + notYetDownloaded;
+        if (totalFound > 0 && scanResult.exitCode() == 0) {
+            return source.withCheckResult(
+                    "OK",
+                    totalFound,
+                    alreadyDownloaded,
+                    notYetDownloaded,
+                    messagePrefix
+                            + "Source kiểm tra OK.\n"
+                            + "Tổng video quét được: "
+                            + totalFound
+                            + "\nĐã có trong DB: "
+                            + alreadyDownloaded
+                            + "\nChưa tải: "
+                            + notYetDownloaded
+            );
+        }
 
-        } else if (totalFound > 0) {
-            status = "Cảnh báo";
-            message = "Có quét được video nhưng yt-dlp trả về exit code: "
-                    + scanResult.exitCode()
-                    + "\n\n"
-                    + "Tổng video quét được: "
-                    + totalFound
-                    + "\n"
-                    + "Đã có trong DB: "
-                    + alreadyDownloaded
-                    + "\n"
-                    + "Chưa tải: "
-                    + notYetDownloaded
-                    + "\n\n"
-                    + shortOutput(scanResult.output());
-
-        } else {
-            status = "Lỗi";
-            message = "Không quét được video nào từ source này.\n"
-                    + "Exit code: "
-                    + scanResult.exitCode()
-                    + "\n\n"
-                    + shortOutput(scanResult.output());
+        if (totalFound > 0) {
+            return source.withCheckResult(
+                    "Cảnh báo",
+                    totalFound,
+                    alreadyDownloaded,
+                    notYetDownloaded,
+                    messagePrefix
+                            + "Có quét được video nhưng yt-dlp trả về exit code: "
+                            + scanResult.exitCode()
+                            + "\n\nTổng video quét được: "
+                            + totalFound
+                            + "\nĐã có trong DB: "
+                            + alreadyDownloaded
+                            + "\nChưa tải: "
+                            + notYetDownloaded
+                            + "\n\n"
+                            + shortOutput(scanResult.output())
+            );
         }
 
         return source.withCheckResult(
-                status,
+                "Lỗi",
                 totalFound,
                 alreadyDownloaded,
                 notYetDownloaded,
-                message
+                messagePrefix
+                        + "Không quét được video nào từ source này.\n"
+                        + "Exit code: "
+                        + scanResult.exitCode()
+                        + "\n\n"
+                        + shortOutput(scanResult.output())
         );
     }
 
@@ -274,11 +271,7 @@ public class SourceHealthCheckService {
         }
 
         try (Connection connection = DatabaseManager.getConnection()) {
-            if (!tableExists(connection, "videos")) {
-                return ids;
-            }
-
-            if (!columnExists(connection, "videos", "source_id")) {
+            if (!tableExists(connection, "videos") || !columnExists(connection, "videos", "source_id")) {
                 return ids;
             }
 
@@ -315,12 +308,7 @@ public class SourceHealthCheckService {
         }
     }
 
-    private SourceScanResult runScanCommand(
-            List<String> command,
-            Path workingDirectory,
-            int timeoutSeconds,
-            Set<String> downloadedIds
-    ) {
+    private SourceScanResult runScanCommand(List<String> command, Path workingDirectory, int timeoutSeconds, Set<String> downloadedIds) {
         Set<String> scannedIds = new LinkedHashSet<>();
         StringBuilder outputBuilder = new StringBuilder();
 
@@ -346,9 +334,7 @@ public class SourceHealthCheckService {
             long startTime = System.currentTimeMillis();
             long timeoutMillis = timeoutSeconds * 1000L;
 
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)
-            )) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 while (true) {
                     boolean readSomething = false;
 
@@ -442,30 +428,14 @@ public class SourceHealthCheckService {
                 exitCode = process.exitValue();
             }
 
-            return new SourceScanResult(
-                    exitCode,
-                    outputBuilder.toString(),
-                    timeout,
-                    limitReached,
-                    scannedIds.size(),
-                    alreadyDownloadedCount,
-                    notYetDownloadedCount
-            );
+            return new SourceScanResult(exitCode, outputBuilder.toString(), timeout, limitReached, scannedIds.size(), alreadyDownloadedCount, notYetDownloadedCount);
 
         } catch (Exception exception) {
             if (process != null && process.isAlive()) {
                 destroyProcess(process);
             }
 
-            return new SourceScanResult(
-                    -1,
-                    outputBuilder + "\n" + exception.getMessage(),
-                    false,
-                    limitReached,
-                    scannedIds.size(),
-                    alreadyDownloadedCount,
-                    notYetDownloadedCount
-            );
+            return new SourceScanResult(-1, outputBuilder + "\n" + exception.getMessage(), false, limitReached, scannedIds.size(), alreadyDownloadedCount, notYetDownloadedCount);
         }
     }
 
@@ -490,10 +460,6 @@ public class SourceHealthCheckService {
             return "";
         }
 
-        /*
-         * yt-dlp --print "%(id)s" chỉ in ID, nhưng vẫn lọc nhẹ để tránh nhầm
-         * các dòng log/error thành video ID.
-         */
         if (!cleanLine.matches("[A-Za-z0-9_-]{4,80}")) {
             return "";
         }
@@ -549,11 +515,7 @@ public class SourceHealthCheckService {
         }
     }
 
-    private boolean columnExists(
-            Connection connection,
-            String tableName,
-            String columnName
-    ) throws SQLException {
+    private boolean columnExists(Connection connection, String tableName, String columnName) throws SQLException {
         String sql = "PRAGMA table_info(" + tableName + ")";
 
         try (PreparedStatement preparedStatement = connection.prepareStatement(sql);
@@ -582,19 +544,9 @@ public class SourceHealthCheckService {
             return cleanOutput;
         }
 
-        return cleanOutput.substring(0, 2000)
-                + "\n\n..."
-                + "\nOutput quá dài nên đã rút gọn.";
+        return cleanOutput.substring(0, 2000) + "\n\n...\nOutput quá dài nên đã rút gọn.";
     }
 
-    private record SourceScanResult(
-            int exitCode,
-            String output,
-            boolean timeout,
-            boolean limitReached,
-            int totalFoundCount,
-            int alreadyDownloadedCount,
-            int notYetDownloadedCount
-    ) {
+    private record SourceScanResult(int exitCode, String output, boolean timeout, boolean limitReached, int totalFoundCount, int alreadyDownloadedCount, int notYetDownloadedCount) {
     }
 }

@@ -18,6 +18,7 @@ public class SourceScannerService {
 
     private final YtDlpService ytDlpService = new YtDlpService();
     private final VideoRepository videoRepository = new VideoRepository();
+    private final TikTokChannelResolverService tiktokChannelResolverService = new TikTokChannelResolverService();
 
     public SourceScanResult findNewVideos(Source source, int requestedCount) {
         if (source == null) {
@@ -26,6 +27,12 @@ public class SourceScannerService {
 
         if (requestedCount <= 0) {
             requestedCount = 6;
+        }
+
+        String sourceUrlForScan = tiktokChannelResolverService.resolveSourceUrlForUse(source);
+
+        if (sourceUrlForScan == null || sourceUrlForScan.isBlank()) {
+            sourceUrlForScan = source.getSourceUrl();
         }
 
         int scanLimit = START_SCAN_LIMIT;
@@ -37,9 +44,10 @@ public class SourceScannerService {
 
         while (scanLimit <= MAX_SCAN_LIMIT) {
             System.out.println("Đang đọc tối đa " + scanLimit + " video từ source...");
+            System.out.println("URL dùng để quét: " + sourceUrlForScan);
 
             latestScannedVideos = ytDlpService.listVideos(
-                    source.getSourceUrl(),
+                    sourceUrlForScan,
                     scanLimit,
                     YT_DLP_TIMEOUT_SECONDS
             );
@@ -78,21 +86,14 @@ public class SourceScannerService {
         );
     }
 
-    private ScanFilterResult filterNewVideos(
-            Long sourceId,
-            List<VideoCandidate> scannedVideos,
-            int requestedCount
-    ) {
+    private ScanFilterResult filterNewVideos(Long sourceId, List<VideoCandidate> scannedVideos, int requestedCount) {
         Set<String> scannedIds = new LinkedHashSet<>();
 
         for (VideoCandidate video : scannedVideos) {
             scannedIds.add(video.getVideoId());
         }
 
-        Set<String> existingIds = videoRepository.findExistingVideoIds(
-                sourceId,
-                scannedIds
-        );
+        Set<String> existingIds = videoRepository.findExistingVideoIds(sourceId, scannedIds);
 
         List<VideoCandidate> newVideos = new ArrayList<>();
         int skippedExistingCount = 0;
@@ -108,15 +109,9 @@ public class SourceScannerService {
             }
         }
 
-        return new ScanFilterResult(
-                newVideos,
-                skippedExistingCount
-        );
+        return new ScanFilterResult(newVideos, skippedExistingCount);
     }
 
-    private record ScanFilterResult(
-            List<VideoCandidate> newVideos,
-            int skippedExistingCount
-    ) {
+    private record ScanFilterResult(List<VideoCandidate> newVideos, int skippedExistingCount) {
     }
 }
