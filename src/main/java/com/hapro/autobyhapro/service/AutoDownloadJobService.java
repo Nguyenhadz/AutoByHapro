@@ -199,7 +199,8 @@ public class AutoDownloadJobService {
                 List<VideoCandidate> roundCandidates = selectDownloadableVideos(
                         target,
                         unattemptedCandidates,
-                        roundCandidateLimit
+                        roundCandidateLimit,
+                        attemptedVideoIds
                 );
 
                 if (roundCandidates.isEmpty()) {
@@ -560,7 +561,8 @@ public class AutoDownloadJobService {
     private List<VideoCandidate> selectDownloadableVideos(
             DownloadTarget target,
             List<VideoCandidate> candidates,
-            int requestedCount
+            int requestedCount,
+            Set<String> attemptedVideoIds
     ) {
         List<VideoCandidate> selectedVideos = new ArrayList<>();
 
@@ -595,6 +597,17 @@ public class AutoDownloadJobService {
                 continue;
             }
 
+            /*
+             * Video đã được xét trong lượt chạy này thì không xét lại nữa.
+             * Đặc biệt với lỗi TikTok extractor như:
+             * "Unable to extract universal data for rehydration",
+             * ta chỉ bỏ qua tạm thời trong lượt chạy hiện tại,
+             * không lưu vào bảng videos như video đã tải/bỏ qua vĩnh viễn.
+             */
+            if (attemptedVideoIds != null) {
+                attemptedVideoIds.add(candidate.getVideoId());
+            }
+
             String cachedContentType = sourceContentCacheRepository.findStableContentType(
                     target.getSourceId(),
                     candidate.getVideoId()
@@ -622,14 +635,30 @@ public class AutoDownloadJobService {
             System.out.println("Cache MISS, kiểm tra TikTok: " + videoUrl);
 
             String contentType = ytDlpService.classifyTikTokContentUrl(videoUrl);
-            String checkStatus = "ERROR".equalsIgnoreCase(contentType) ? "ERROR" : "OK";
+
+            /*
+             * ERROR/UNKNOWN từ TikTok thường là lỗi tạm thời do challenge,
+             * extractor hoặc TikTok trả webpage thiếu dữ liệu.
+             * Không lưu ERROR/UNKNOWN vào cache DB để tránh lần sau bị bỏ qua oan.
+             * Chỉ lưu các loại đã xác định ổn định: VIDEO, PHOTO, AUDIO_ONLY.
+             */
+            if ("ERROR".equalsIgnoreCase(contentType)
+                    || "UNKNOWN".equalsIgnoreCase(contentType)) {
+                System.out.println(
+                        "Bỏ qua TikTok "
+                                + contentType
+                                + " tạm thời trong lượt này, không lưu cache DB: "
+                                + candidate.getVideoId()
+                );
+                continue;
+            }
 
             sourceContentCacheRepository.saveCheckResult(
                     target.getSourceId(),
                     target.getSourceType(),
                     candidate,
                     contentType,
-                    checkStatus,
+                    "OK",
                     "Auto check TikTok content type before download"
             );
 
