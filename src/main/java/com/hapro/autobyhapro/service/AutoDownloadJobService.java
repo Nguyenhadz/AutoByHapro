@@ -134,46 +134,85 @@ public class AutoDownloadJobService {
         try {
             Source source = toSource(target);
 
-            int currentScanLimit = buildInitialScanRequestCount(safeRequestedCount);
+            int initialScanSize = buildInitialScanRequestCount(safeRequestedCount);
             int maxScanLimit = buildMaxScanRequestCount(target, safeRequestedCount);
-            int lastScannedCount = -1;
+
+            int playlistStart = 1;
+            int playlistEnd = Math.min(initialScanSize, maxScanLimit);
             boolean firstScan = true;
 
             Set<String> attemptedVideoIds = new LinkedHashSet<>();
 
             while (countSuccess(downloadResults) < safeRequestedCount
-                    && currentScanLimit <= maxScanLimit) {
+                    && playlistStart <= maxScanLimit) {
 
                 int beforeSuccessCount = countSuccess(downloadResults);
+                int currentChunkSize = Math.max(
+                        1,
+                        playlistEnd - playlistStart + 1
+                );
 
                 if (firstScan) {
                     System.out.println(
                             "Quét lần đầu: "
                                     + safeRequestedCount
                                     + " x 2 = "
-                                    + currentScanLimit
+                                    + currentChunkSize
                                     + " video."
+                    );
+                    System.out.println(
+                            "Phạm vi quét: video "
+                                    + playlistStart
+                                    + " -> "
+                                    + playlistEnd
+                                    + "."
                     );
                 } else {
                     System.out.println(
                             "Chưa tải đủ "
                                     + safeRequestedCount
                                     + " video. Quét tiếp thêm "
-                                    + FOLLOW_UP_SCAN_STEP
-                                    + " video, tổng số video quét tối đa: "
-                                    + currentScanLimit
+                                    + currentChunkSize
+                                    + " video."
+                    );
+                    System.out.println(
+                            "Phạm vi quét: video "
+                                    + playlistStart
+                                    + " -> "
+                                    + playlistEnd
                                     + "."
                     );
                 }
 
                 latestScanResult = sourceScannerService.findNewVideos(
                         source,
-                        currentScanLimit
+                        playlistStart,
+                        playlistEnd
                 );
+
+                boolean reachedSourceEnd = latestScanResult.getScannedCount() < currentChunkSize;
 
                 if (latestScanResult.getNewVideos() == null
                         || latestScanResult.getNewVideos().isEmpty()) {
-                    break;
+
+                    /*
+                     * Nếu cả đoạn vừa quét đều đã có trong DB, không dừng ngay.
+                     * Chuyển sang đoạn kế tiếp, ví dụ:
+                     * 1-12 -> 13-22 -> 23-32.
+                     */
+                    if (reachedSourceEnd) {
+                        break;
+                    }
+
+                    int[] nextRange = nextScanRange(
+                            playlistEnd,
+                            maxScanLimit
+                    );
+
+                    playlistStart = nextRange[0];
+                    playlistEnd = nextRange[1];
+                    firstScan = false;
+                    continue;
                 }
 
                 List<VideoCandidate> unattemptedCandidates = filterUnattemptedVideos(
@@ -182,34 +221,40 @@ public class AutoDownloadJobService {
                 );
 
                 if (unattemptedCandidates.isEmpty()) {
-                    if (latestScanResult.getScannedCount() == lastScannedCount) {
+                    if (reachedSourceEnd) {
                         break;
                     }
 
-                    lastScannedCount = latestScanResult.getScannedCount();
-                    currentScanLimit = nextScanLimit(currentScanLimit, maxScanLimit);
+                    int[] nextRange = nextScanRange(
+                            playlistEnd,
+                            maxScanLimit
+                    );
+
+                    playlistStart = nextRange[0];
+                    playlistEnd = nextRange[1];
                     firstScan = false;
                     continue;
                 }
 
-                int roundCandidateLimit = firstScan
-                        ? currentScanLimit
-                        : FOLLOW_UP_SCAN_STEP;
-
                 List<VideoCandidate> roundCandidates = selectDownloadableVideos(
                         target,
                         unattemptedCandidates,
-                        roundCandidateLimit,
+                        currentChunkSize,
                         attemptedVideoIds
                 );
 
                 if (roundCandidates.isEmpty()) {
-                    if (latestScanResult.getScannedCount() == lastScannedCount) {
+                    if (reachedSourceEnd) {
                         break;
                     }
 
-                    lastScannedCount = latestScanResult.getScannedCount();
-                    currentScanLimit = nextScanLimit(currentScanLimit, maxScanLimit);
+                    int[] nextRange = nextScanRange(
+                            playlistEnd,
+                            maxScanLimit
+                    );
+
+                    playlistStart = nextRange[0];
+                    playlistEnd = nextRange[1];
                     firstScan = false;
                     continue;
                 }
@@ -250,13 +295,17 @@ public class AutoDownloadJobService {
                     break;
                 }
 
-                if (latestScanResult.getScannedCount() == lastScannedCount
-                        || latestScanResult.getScannedCount() < currentScanLimit) {
+                if (reachedSourceEnd) {
                     break;
                 }
 
-                lastScannedCount = latestScanResult.getScannedCount();
-                currentScanLimit = nextScanLimit(currentScanLimit, maxScanLimit);
+                int[] nextRange = nextScanRange(
+                        playlistEnd,
+                        maxScanLimit
+                );
+
+                playlistStart = nextRange[0];
+                playlistEnd = nextRange[1];
                 firstScan = false;
             }
 
@@ -394,8 +443,25 @@ public class AutoDownloadJobService {
         return result;
     }
 
+
     private int buildInitialScanRequestCount(int requestedCount) {
         return Math.max(1, requestedCount * 2);
+    }
+
+    private int[] nextScanRange(
+            int currentPlaylistEnd,
+            int maxScanLimit
+    ) {
+        int nextStart = currentPlaylistEnd + 1;
+        int nextEnd = Math.min(
+                currentPlaylistEnd + FOLLOW_UP_SCAN_STEP,
+                maxScanLimit
+        );
+
+        return new int[]{
+                nextStart,
+                nextEnd
+        };
     }
 
     private int nextScanLimit(int currentScanLimit, int maxScanLimit) {
@@ -551,11 +617,16 @@ public class AutoDownloadJobService {
     private int buildMaxScanRequestCount(DownloadTarget target, int requestedCount) {
         int safeRequestedCount = Math.max(1, requestedCount);
 
+        /*
+         * Không đặt max quá thấp, vì nhiều source đã có hàng trăm video đầu
+         * được lưu trong DB dưới dạng IGNORED / UPLOADED_DELETED / DOWNLOADED.
+         * Tool vẫn quét tăng dần +10 mỗi lần, nhưng được phép đi sâu hơn.
+         */
         if (isTikTokTarget(target)) {
-            return Math.max(500, safeRequestedCount * 30);
+            return Math.max(2000, safeRequestedCount * 200);
         }
 
-        return Math.max(200, safeRequestedCount * 20);
+        return Math.max(2000, safeRequestedCount * 200);
     }
 
     private List<VideoCandidate> selectDownloadableVideos(
